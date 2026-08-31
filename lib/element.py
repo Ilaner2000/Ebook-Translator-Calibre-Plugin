@@ -292,7 +292,9 @@ class PageElement(Element):
                 declarations.append('display:inline-block')
                 declarations.append('padding-%s:%sem' % (edge, gap))
             elif name not in inline_elements:
-                declarations.append('margin-%s:%sem' % (edge, gap))
+                # Adjacent block margins collapse. Padding makes the visible
+                # gap match the configured value for ordinary paragraphs.
+                declarations.append('padding-%s:%sem' % (edge, gap))
             if declarations:
                 if style is None:
                     style = new_element.get(
@@ -335,11 +337,17 @@ class PageElement(Element):
                 xml_escape(pattern), lambda _: element, translation)
         translation = self._polish_translation(translation)
 
+        group_elements = ('li', 'th', 'td', 'caption')
         element_name = get_name(self.element)
-        new_element = self._create_new_element(element_name, translation)
+        parent_element = self.element.getparent()
+        is_table_descendant = parent_element is not None and \
+            get_name(parent_element) in group_elements
+        is_text_element = element_name in inline_elements
+        new_element = self._create_new_element(
+            element_name, translation,
+            apply_inline_gap=is_text_element and is_table_descendant)
 
         # Add translation for table elements.
-        group_elements = ('li', 'th', 'td', 'caption')
         if element_name in group_elements:
             if self.position == 'only':
                 self.element.addnext(new_element)
@@ -373,8 +381,6 @@ class PageElement(Element):
                 self.element.append(new_element)
             return
 
-        is_text_element = element_name in inline_elements
-
         # Add translation for left or right position.
         if self.position in ('left', 'right') and not is_text_element:
             self.element.addnext(self._create_table(new_element))
@@ -390,10 +396,6 @@ class PageElement(Element):
             self._add_translation_for_line_breaks(
                 new_element, original_br_list, translation_br_list)
             return
-
-        parent_element = self.element.getparent()
-        is_table_descendant = parent_element is not None and \
-            get_name(parent_element) in group_elements
 
         if self.position == 'only':
             self.element.addnext(new_element)

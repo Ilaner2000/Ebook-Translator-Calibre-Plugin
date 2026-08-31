@@ -686,7 +686,7 @@ epub:type="pagebreak"/>b</code></p></body>
         original, translation = self.xhtml.findall('.//x:p', namespaces=ns)
         self.assertIsNone(original.get('style'))
         self.assertEqual(
-            'color:blue;margin-top:1em', translation.get('style'))
+            'color:blue;padding-top:1em', translation.get('style'))
 
     def test_zero_vertical_gap_preserves_inline_style_exactly(self):
         self.element.element.set('style', 'font-weight:bold;')
@@ -704,7 +704,7 @@ epub:type="pagebreak"/>b</code></p></body>
         self.element.add_translation('test')
 
         translation, original = self.xhtml.findall('.//x:p', namespaces=ns)
-        self.assertEqual('margin-bottom:0.75em', translation.get('style'))
+        self.assertEqual('padding-bottom:0.75em', translation.get('style'))
         self.assertIsNone(original.get('style'))
 
     def test_add_translation_group_and_inline_with_vertical_gap(self):
@@ -740,7 +740,7 @@ epub:type="pagebreak"/>b</code></p></body>
         self.assertEqual(2, len(inline_elements))
         self.assertIsNone(inline_elements[1].get('style'))
 
-    def test_block_with_attributes_uses_margin_gap(self):
+    def test_block_with_attributes_uses_non_collapsing_padding_gap(self):
         xhtml = etree.XML(
             b'<body xmlns="http://www.w3.org/1999/xhtml">'
             b'<p class="body" cite="source">a</p></body>')
@@ -752,7 +752,22 @@ epub:type="pagebreak"/>b</code></p></body>
         translation = xhtml.findall('./x:p', namespaces=ns)[1]
         self.assertEqual('body', translation.get('class'))
         self.assertEqual('source', translation.get('cite'))
-        self.assertEqual('margin-top:1em', translation.get('style'))
+        self.assertEqual('padding-top:1em', translation.get('style'))
+
+    def test_inline_table_descendant_uses_inline_gap(self):
+        xhtml = etree.XML(
+            b'<table xmlns="http://www.w3.org/1999/xhtml"><tr><td>'
+            b'<span class="term">a</span></td></tr></table>')
+        element = PageElement(xhtml.find('.//x:span', namespaces=ns), 'p1')
+        element.position = 'below'
+        element.vertical_gap = 0.5
+        element.add_translation('A')
+
+        translations = xhtml.findall('.//x:td/x:span', namespaces=ns)
+        self.assertEqual(2, len(translations))
+        self.assertEqual(
+            'display:inline-block;padding-top:0.5em',
+            translations[1].get('style'))
 
     def test_line_break_wrappers_use_inline_gap(self):
         xhtml = etree.XML(
@@ -788,6 +803,8 @@ epub:type="pagebreak"/>b</code></p></body>
                         './/*[text()="A"]', namespaces=ns):
                     self.assertNotIn(
                         'margin-', translated.get('style', ''))
+                    self.assertNotIn(
+                        'padding-', translated.get('style', ''))
                     self.assertNotIn(
                         'padding-', translated.get('style', ''))
 
