@@ -759,6 +759,9 @@ msgstr "译文"
 msgid "Column Gap"
 msgstr "栏间距"
 
+msgid "Vertical Gap"
+msgstr "垂直间距"
+
 msgid "Percentage"
 msgstr "百分比"
 

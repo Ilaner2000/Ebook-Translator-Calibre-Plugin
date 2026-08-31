@@ -989,6 +989,10 @@ msgstr ""
 msgid "Column Gap"
 msgstr ""
 
+#: setting.py:870
+msgid "Vertical Gap"
+msgstr ""
+
 #: setting.py:851
 msgid "Percentage"
 msgstr ""

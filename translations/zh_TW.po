@@ -748,6 +748,9 @@ msgstr ""
 msgid "Column Gap"
 msgstr ""
 
+msgid "Vertical Gap"
+msgstr "垂直間距"
+
 msgid "Percentage"
 msgstr ""
 
