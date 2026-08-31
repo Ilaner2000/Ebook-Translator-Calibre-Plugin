@@ -151,6 +151,8 @@ class TestElement(unittest.TestCase):
         self.assertEqual(1.25, self.element.vertical_gap)
         self.element.set_vertical_gap(4)
         self.assertEqual(3.0, self.element.vertical_gap)
+        self.element.set_vertical_gap(0.004)
+        self.assertEqual(0.0, self.element.vertical_gap)
         self.element.set_vertical_gap('invalid')
         self.assertEqual(0.0, self.element.vertical_gap)
 
@@ -708,8 +710,9 @@ epub:type="pagebreak"/>b</code></p></body>
     def test_add_translation_group_and_inline_with_vertical_gap(self):
         xhtml = etree.XML(b"""<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml">
-    <body><ul><li>item</li></ul><table><tr><td>cell</td></tr></table>
-    <p><span>inline</span></p></body>
+    <body><ul><li class="item">item</li></ul>
+    <table><tr><td class="cell">cell</td></tr></table>
+    <p><span class="inline">inline</span></p></body>
 </html>""")
         item = PageElement(xhtml.find('.//x:li', namespaces=ns), 'p1')
         item.position = 'below'
@@ -735,9 +738,40 @@ epub:type="pagebreak"/>b</code></p></body>
         inline.add_translation('INLINE')
         inline_elements = xhtml.findall('.//x:p/x:span', namespaces=ns)
         self.assertEqual(2, len(inline_elements))
-        self.assertEqual(
-            'display:block;padding-top:1em',
-            inline_elements[1].get('style'))
+        self.assertIsNone(inline_elements[1].get('style'))
+
+    def test_block_with_attributes_uses_margin_gap(self):
+        xhtml = etree.XML(
+            b'<body xmlns="http://www.w3.org/1999/xhtml">'
+            b'<p class="body" cite="source">a</p></body>')
+        element = PageElement(xhtml.find('./x:p', namespaces=ns), 'p1')
+        element.position = 'below'
+        element.vertical_gap = 1
+        element.add_translation('A')
+
+        translation = xhtml.findall('./x:p', namespaces=ns)[1]
+        self.assertEqual('body', translation.get('class'))
+        self.assertEqual('source', translation.get('cite'))
+        self.assertEqual('margin-top:1em', translation.get('style'))
+
+    def test_line_break_wrappers_use_inline_gap(self):
+        xhtml = etree.XML(
+            b'<body xmlns="http://www.w3.org/1999/xhtml">'
+            b'<p class="body">a<br/>b</p></body>')
+        element = PageElement(xhtml.find('./x:p', namespaces=ns), 'p1')
+        element.reserve_pattern = create_xpath(('br',))
+        element.placeholder = Base.placeholder
+        element.position = 'below'
+        element.vertical_gap = 1
+        element.get_content()
+        element.add_translation('A{{id_00000}}B')
+
+        translations = xhtml.findall('./x:p/x:span', namespaces=ns)
+        self.assertEqual(2, len(translations))
+        for translation in translations:
+            self.assertEqual(
+                'display:block;padding-top:1em',
+                translation.get('style'))
 
     def test_vertical_gap_is_ignored_for_only_and_side_by_side(self):
         for position in ('only', 'left', 'right'):

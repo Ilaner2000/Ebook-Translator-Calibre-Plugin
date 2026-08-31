@@ -64,7 +64,8 @@ class Element:
 
     def set_vertical_gap(self, value):
         try:
-            self.vertical_gap = max(0.0, min(float(value), 3.0))
+            self.vertical_gap = round(
+                max(0.0, min(float(value), 3.0)), 2)
         except (TypeError, ValueError):
             self.vertical_gap = 0.0
 
@@ -256,7 +257,8 @@ class PageElement(Element):
         return re.sub(r'((\w)\2{3})\2*', r'\1', translation)
 
     def _create_new_element(
-            self, name, content='', copy_attrs=True, excluding_attrs=[]):
+            self, name, content='', copy_attrs=True, excluding_attrs=[],
+            apply_inline_gap=False):
         # Copy the namespaces from the original namespaces to the new ones.
         namespaces = ' '.join(
             'xmlns%s="%s"' % ('' if name is None else ':' + name, value)
@@ -265,11 +267,11 @@ class PageElement(Element):
             name, namespaces, trim(content)))
         # Preserve all attributes from the original element.
         if copy_attrs:
-            for name, value in self.element.items():
-                if (name == 'id' and self.position != 'only') or \
-                        name in excluding_attrs:
+            for attr_name, value in self.element.items():
+                if (attr_name == 'id' and self.position != 'only') or \
+                        attr_name in excluding_attrs:
                     continue
-                new_element.set(name, value)
+                new_element.set(attr_name, value)
         # Set the attributes for the new element.
         new_element.set('dir', self.target_direction or 'auto')
         if self.translation_lang is not None:
@@ -280,17 +282,19 @@ class PageElement(Element):
             # replaces the copied inline style.
             style = 'color:%s' % self.translation_color
         if self.vertical_gap > 0 and self.position in ('above', 'below'):
-            if style is None:
-                style = new_element.get('style', '').strip().rstrip(';')
             edge = 'top' if self.position == 'below' else 'bottom'
             gap = ('%.2f' % self.vertical_gap).rstrip('0').rstrip('.')
             declarations = []
-            if name in inline_elements:
+            if name in inline_elements and apply_inline_gap:
                 declarations.append('display:block')
                 declarations.append('padding-%s:%sem' % (edge, gap))
-            else:
+            elif name not in inline_elements:
                 declarations.append('margin-%s:%sem' % (edge, gap))
-            style = ';'.join(filter(None, (style, *declarations)))
+            if declarations:
+                if style is None:
+                    style = new_element.get(
+                        'style', '').strip().rstrip(';')
+                style = ';'.join(filter(None, (style, *declarations)))
         if style is not None:
             new_element.set('style', style)
         return new_element
@@ -338,7 +342,8 @@ class PageElement(Element):
                 self.element.addnext(new_element)
                 self._safe_remove(self.element)
             new_element = self._create_new_element(
-                'span', translation, excluding_attrs=['class'])
+                'span', translation, excluding_attrs=['class'],
+                apply_inline_gap=True)
             if self.position in ['left', 'above']:
                 if self.element.text is not None:
                     if self.position == 'above':
@@ -426,7 +431,8 @@ class PageElement(Element):
             for index, br in enumerate(original_br_list):
                 translation_br = translation_br_list[index]
                 wrapper = self._create_new_element(
-                    'span', copy_attrs=False, excluding_attrs=['class'])
+                    'span', copy_attrs=False, excluding_attrs=['class'],
+                    apply_inline_gap=True)
                 # Get preceding siblings in reverse document order.
                 for sibling in translation_br.itersiblings(preceding=True):
                     if get_name(sibling) == 'br':
@@ -445,7 +451,8 @@ class PageElement(Element):
                             tail is None or tail.strip() == ''):
                         continue
                     wrapper = self._create_new_element(
-                        'span', copy_attrs=False, excluding_attrs=['class'])
+                        'span', copy_attrs=False, excluding_attrs=['class'],
+                        apply_inline_gap=True)
                     for sibling in translation_br.itersiblings():
                         wrapper.append(sibling)
                     wrapper.text = tail
@@ -456,7 +463,8 @@ class PageElement(Element):
             for index, br in enumerate(original_br_list):
                 translation_br = translation_br_list[index]
                 wrapper = self._create_new_element(
-                    'span', copy_attrs=False, excluding_attrs=['class'])
+                    'span', copy_attrs=False, excluding_attrs=['class'],
+                    apply_inline_gap=True)
                 for sibling in translation_br.itersiblings():
                     if get_name(sibling) == 'br':
                         break
@@ -470,7 +478,8 @@ class PageElement(Element):
                     new_br.addprevious(wrapper)
                 if br == original_br_list[0]:
                     wrapper = self._create_new_element(
-                        'span', copy_attrs=False, excluding_attrs=['class'])
+                        'span', copy_attrs=False, excluding_attrs=['class'],
+                        apply_inline_gap=True)
                     if translation_br.getprevious() is None and (
                             text is None or text.strip() == ''):
                         continue
@@ -705,7 +714,8 @@ class ElementHandler:
 
     def set_vertical_gap(self, value):
         try:
-            self.vertical_gap = max(0.0, min(float(value), 3.0))
+            self.vertical_gap = round(
+                max(0.0, min(float(value), 3.0)), 2)
         except (TypeError, ValueError):
             self.vertical_gap = 0.0
 
