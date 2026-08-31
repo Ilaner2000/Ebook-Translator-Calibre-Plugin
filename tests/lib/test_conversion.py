@@ -1,13 +1,62 @@
 import unittest
 from pathlib import Path
 from typing import Callable
-from unittest.mock import patch, Mock
+from types import SimpleNamespace
+from unittest.mock import patch, Mock, call
 
-from ...lib.conversion import ConversionWorker
+from ...lib.conversion import ConversionWorker, convert_variants_item
 from ...lib.ebook import Ebook
 
 
 module_name = 'calibre_plugins.ebook_translator.lib.conversion'
+
+
+class TestConvertVariantsItem(unittest.TestCase):
+    @patch(module_name + '.convert_book')
+    @patch(module_name + '.get_translation')
+    @patch(module_name + '.get_cache')
+    @patch(module_name + '.get_element_handler')
+    @patch(module_name + '.get_translator')
+    def test_reuses_one_translation_context_for_two_renders(
+            self, mock_get_translator, mock_get_handler, mock_get_cache,
+            mock_get_translation, mock_convert_book):
+        translator = mock_get_translator.return_value
+        translator.placeholder = ('placeholder', 'pattern')
+        translator.separator = '<sep>'
+        translator.name = 'Test Engine'
+        translator.get_iso639_target_code.return_value = 'zh'
+        translation = mock_get_translation.return_value
+        cache = mock_get_cache.return_value
+        cache.is_persistence.return_value = True
+        translation_handler = Mock()
+        translation_handler.get_merge_length.return_value = 1800
+        bilingual_handler = Mock()
+        mock_get_handler.side_effect = [
+            translation_handler, bilingual_handler]
+        notification = Mock()
+
+        convert_variants_item(
+            'Title', '/input.epub', '/translation.epub',
+            '/bilingual.epub', 'English', 'Chinese', False, False,
+            'epub', 'utf-8', 'auto', 1.0, notification)
+
+        mock_get_translator.assert_called_once_with()
+        mock_get_translation.assert_called_once()
+        mock_get_cache.assert_called_once()
+        self.assertEqual('only', translation_handler.position)
+        translation_handler.set_vertical_gap.assert_called_once_with(0.0)
+        self.assertEqual('below', bilingual_handler.position)
+        bilingual_handler.set_vertical_gap.assert_called_once_with(1.0)
+        self.assertEqual([call(False), call(True)],
+                         cache.set_cache_only.call_args_list)
+        self.assertEqual(2, mock_convert_book.call_count)
+        first, second = mock_convert_book.call_args_list
+        self.assertIs(translation, first.args[2])
+        self.assertIs(translation, second.args[2])
+        self.assertIs(cache, first.args[4])
+        self.assertIs(cache, second.args[4])
+        self.assertEqual(0, translation.total)
+        cache.done.assert_called_once_with()
 
 
 class TestConversionWorker(unittest.TestCase):
@@ -25,6 +74,343 @@ class TestConversionWorker(unittest.TestCase):
 
     def test_create_worker(self):
         self.assertIsInstance(self.worker, ConversionWorker)
+
+    @patch(module_name + '.temporary_path')
+    @patch(module_name + '.temporary_copy')
+    @patch(module_name + '.warning_dialog')
+    def test_translate_variants_changes_a_to_b_for_annotations(
+            self, mock_warning, mock_copy, mock_temp_path):
+        self.worker.config = {
+            'to_library': True,
+            'translation_variant_storage': 'bundle_data',
+            'vertical_gap': 1.0,
+        }
+        self.worker.working_jobs = {}
+        self.ebook.id = 7
+        self.ebook.title = 'Title'
+        self.ebook.input_format = 'epub'
+        self.ebook.output_format = 'epub'
+        self.ebook.source_lang = 'English'
+        self.ebook.target_lang = 'Chinese'
+        self.ebook.encoding = 'utf-8'
+        self.ebook.target_direction = 'auto'
+        self.worker.api.annotation_count_for_book.return_value = 1
+        self.worker.api.get_last_read_positions.return_value = []
+        mock_copy.return_value = '/source.epub'
+        mock_temp_path.side_effect = [
+            '/translation.epub', '/bilingual.epub']
+        job = Mock()
+        self.worker.gui.job_manager.run_job.return_value = job
+
+        result = self.worker.translate_variants(
+            self.ebook, '/input.epub')
+
+        self.assertIs(job, result)
+        payload = self.worker.working_jobs[job][1]
+        self.assertEqual('bundle_data', payload['requested_storage'])
+        self.assertEqual('linked_pair', payload['effective_storage'])
+        mock_warning.assert_called_once()
+
+    @patch(module_name + '.temporary_path')
+    @patch(module_name + '.temporary_copy')
+    @patch(module_name + '.warning_dialog')
+    def test_translate_variants_changes_a_to_b_for_last_read_position(
+            self, mock_warning, mock_copy, mock_temp_path):
+        self.worker.config = {
+            'to_library': True,
+            'translation_variant_storage': 'bundle_data',
+            'vertical_gap': 1.0,
+        }
+        self.worker.working_jobs = {}
+        self.ebook.id = 7
+        self.ebook.title = 'Title'
+        self.ebook.input_format = 'epub'
+        self.ebook.output_format = 'epub'
+        self.ebook.source_lang = 'English'
+        self.ebook.target_lang = 'Chinese'
+        self.ebook.encoding = 'utf-8'
+        self.ebook.target_direction = 'auto'
+        self.worker.api.annotation_count_for_book.return_value = 0
+        self.worker.api.get_last_read_positions.return_value = [{}]
+        mock_copy.return_value = '/source.epub'
+        mock_temp_path.side_effect = [
+            '/translation.epub', '/bilingual.epub']
+        job = Mock()
+        self.worker.gui.job_manager.run_job.return_value = job
+
+        self.worker.translate_variants(self.ebook, '/input.epub')
+
+        payload = self.worker.working_jobs[job][1]
+        self.assertEqual('linked_pair', payload['effective_storage'])
+        mock_warning.assert_called_once()
+
+    @patch(module_name + '.error_dialog')
+    def test_translate_variants_rejects_unsupported_scope(self, mock_error):
+        self.worker.config = {'to_library': False}
+        self.ebook.id = 7
+        self.ebook.input_format = 'epub'
+        self.ebook.output_format = 'epub'
+
+        result = self.worker.translate_variants(
+            self.ebook, '/input.epub')
+
+        self.assertIsNone(result)
+        mock_error.assert_called_once()
+        self.worker.gui.job_manager.run_job.assert_not_called()
+
+    def variant_payload(self, storage):
+        return {
+            'variants': True,
+            'source_path': '/source.epub',
+            'translation_path': '/translation.epub',
+            'bilingual_path': '/bilingual.epub',
+            'requested_storage': storage,
+            'effective_storage': storage,
+            'run_id': 'run-1',
+        }
+
+    def configure_variant_ebook(self):
+        self.worker.config = {
+            'ebook_metadata': {},
+            'engine_preferences': {},
+            'vertical_gap': 1.0,
+        }
+        self.ebook.id = 7
+        self.ebook.lang_code = 'zh-Hant'
+        self.ebook.source_lang = 'English'
+        self.ebook.target_lang = 'Chinese'
+        self.worker.api.field_for.return_value = 'source-uuid'
+        self.worker.api.add_format.return_value = True
+        self.worker.api.format_abspath.return_value = '/library/translation.epub'
+
+    @patch(module_name + '.file_sha256', return_value='hash')
+    @patch(module_name + '.get_translator')
+    def test_manifest_records_actual_default_engine(
+            self, mock_get_translator, mock_hash):
+        self.configure_variant_ebook()
+        mock_get_translator.return_value.name = 'Default Engine'
+
+        manifest = self.worker._variant_manifest(
+            self.ebook, self.variant_payload('linked_pair'),
+            'source-uuid', {'translation': 21, 'bilingual': None})
+
+        self.assertEqual('Default Engine', manifest['translation_engine'])
+        mock_get_translator.assert_called_once_with()
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_a_replaces_main_after_verified_data(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        translation_metadata = Mock()
+        bilingual_metadata = Mock()
+        mock_metadata.side_effect = [
+            (translation_metadata, 'Chinese title'),
+            (bilingual_metadata, 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+
+        result = self.worker._store_variants(
+            self.ebook, self.variant_payload('bundle_data'))
+
+        files = mock_add_extra.call_args.args[1]
+        self.assertEqual('/source.epub', files[
+            'translation-variants/run-1/source.epub'])
+        self.assertEqual('/bilingual.epub', files[
+            'translation-variants/run-1/bilingual.zh-Hant.epub'])
+        self.worker.api.add_format.assert_called_once_with(
+            7, 'EPUB', '/translation.epub', replace=True, run_hooks=False)
+        self.worker.db.create_book_entry.assert_not_called()
+        self.assertEqual(
+            ('/library/translation.epub', 'Chinese title', 0), result)
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_b_creates_one_linked_book(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        self.worker.db.create_book_entry.return_value = 21
+
+        result = self.worker._store_variants(
+            self.ebook, self.variant_payload('linked_pair'))
+
+        files = mock_add_extra.call_args.args[1]
+        self.assertNotIn(
+            'translation-variants/run-1/source.epub', files)
+        self.assertIn(
+            'translation-variants/run-1/bilingual.zh-Hant.epub', files)
+        self.worker.api.add_format.assert_called_once_with(
+            21, 'EPUB', '/translation.epub', run_hooks=False)
+        self.worker.gui.library_view.model().books_added \
+            .assert_called_once_with(1)
+        self.assertEqual(
+            ('/library/translation.epub', 'Chinese title', 1), result)
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_c_creates_two_books(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        self.worker.db.create_book_entry.side_effect = [21, 22]
+
+        result = self.worker._store_variants(
+            self.ebook, self.variant_payload('three_records'))
+
+        files = mock_add_extra.call_args.args[1]
+        self.assertEqual({
+            'translation-variants/run-1/manifest.json': '/manifest.json'
+        }, files)
+        self.assertEqual([
+            call(21, 'EPUB', '/translation.epub', run_hooks=False),
+            call(22, 'EPUB', '/bilingual.epub', run_hooks=False),
+        ], self.worker.api.add_format.call_args_list)
+        self.worker.gui.library_view.model().books_added \
+            .assert_called_once_with(2)
+        self.assertEqual(
+            ('/library/translation.epub', 'Chinese title', 2), result)
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_a_restores_source_when_replace_fails(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        self.worker.api.add_format.side_effect = [RuntimeError('fail'), True]
+
+        with self.assertRaises(RuntimeError):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('bundle_data'))
+
+        self.assertEqual([
+            call(7, 'EPUB', '/translation.epub',
+                 replace=True, run_hooks=False),
+            call(7, 'EPUB', '/source.epub',
+                 replace=True, run_hooks=False),
+        ], self.worker.api.add_format.call_args_list)
+        self.worker.api.remove_extra_files.assert_called_once()
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_a_keeps_source_data_when_restore_fails(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        self.worker.api.add_format.side_effect = [
+            RuntimeError('replace failed'), RuntimeError('restore failed')]
+
+        with self.assertRaisesRegex(
+                RuntimeError, 'verified source remains'):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('bundle_data'))
+
+        self.worker.api.remove_extra_files.assert_not_called()
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_a_never_replaces_when_data_verification_fails(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        mock_add_extra.side_effect = RuntimeError('hash mismatch')
+
+        with self.assertRaisesRegex(RuntimeError, 'hash mismatch'):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('bundle_data'))
+
+        self.worker.api.add_format.assert_not_called()
+        self.worker.api.remove_extra_files.assert_called_once()
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_b_trashes_new_book_on_data_failure(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        self.worker.db.create_book_entry.return_value = 21
+        mock_add_extra.side_effect = RuntimeError('fail')
+
+        with self.assertRaises(RuntimeError):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('linked_pair'))
+
+        self.worker.api.remove_books.assert_called_once_with(
+            [21], permanent=False)
+        self.assertNotIn(
+            7, self.worker.api.remove_books.call_args.args[0])
+
+    def test_create_variant_book_trashes_record_when_format_add_fails(self):
+        self.worker.db.create_book_entry.return_value = 21
+        self.worker.api.add_format.side_effect = RuntimeError('fail')
+
+        with self.assertRaisesRegex(RuntimeError, 'fail'):
+            self.worker._create_variant_book(Mock(), '/translation.epub')
+
+        self.worker.api.remove_books.assert_called_once_with(
+            [21], permanent=False)
+
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_c_trashes_both_if_second_format_fails(
+            self, mock_metadata):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        self.worker.db.create_book_entry.side_effect = [21, 22]
+        self.worker.api.add_format.side_effect = [
+            True, RuntimeError('second format failed')]
+
+        with self.assertRaisesRegex(RuntimeError, 'second format failed'):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('three_records'))
+
+        self.assertEqual([
+            call([22], permanent=False),
+            call([21], permanent=False),
+        ], self.worker.api.remove_books.call_args_list)
+
+    @patch(module_name + '.file_sha256')
+    def test_add_verified_extra_files_rejects_hash_mismatch(self, mock_hash):
+        self.worker.api.list_extra_files.return_value = [SimpleNamespace(
+            relpath='translation-variants/run/source.epub',
+            file_path='/stored/source.epub')]
+        mock_hash.side_effect = ['source-hash', 'different-hash']
+
+        with self.assertRaisesRegex(RuntimeError, 'hash mismatch'):
+            self.worker._add_verified_extra_files(7, {
+                'translation-variants/run/source.epub': '/source.epub'})
 
     def test_translate_done_job_failed_debug(self):
         self.job.failed = True

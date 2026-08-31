@@ -27,6 +27,8 @@ defaults: dict[str, Any] = {
     'show_notification': True,
     'translation_position': None,
     'vertical_gap': 0.0,
+    'translation_variants_enabled': False,
+    'translation_variant_storage': 'bundle_data',
     'column_gap': {
         '_type': 'percentage',
         'percentage': 10,

@@ -199,9 +199,73 @@ class TranslationSetting(QDialog):
         radio_group.setLayout(radio_layout)
         layout.addWidget(radio_group)
 
+        # Translation Variants
+        variants_group = QGroupBox(_('Translation Variants'))
+        variants_layout = QVBoxLayout(variants_group)
+        variants_enabled = QCheckBox(_(
+            'Create source, translation-only, and bilingual versions'))
+        variants_layout.addWidget(variants_enabled)
+        storage_layout = QHBoxLayout()
+        storage_layout.addWidget(QLabel(_('Variant Storage')))
+        variant_storage = QComboBox()
+        variant_storage.addItem(_(
+            'A — Chinese main file; source and bilingual in Data'),
+            'bundle_data')
+        variant_storage.addItem(_(
+            'B — Keep source; add Chinese book; bilingual in Data'),
+            'linked_pair')
+        variant_storage.addItem(_(
+            'C — Source, Chinese, and bilingual as separate books'),
+            'three_records')
+        storage_layout.addWidget(variant_storage, 1)
+        variants_layout.addLayout(storage_layout)
+        variant_summary = QLabel()
+        variant_summary.setWordWrap(True)
+        variants_layout.addWidget(variant_summary)
+        layout.addWidget(variants_group)
+
+        storage_summaries = {
+            'bundle_data': _(
+                'The Chinese EPUB replaces the main EPUB. The source and '
+                'bilingual EPUBs are archived in Data and must be exported '
+                'to read. The source leaves full-text search. If highlights '
+                'or reading progress exist, this run automatically uses B.'),
+            'linked_pair': _(
+                'The source book remains unchanged. A linked Chinese book '
+                'is added; its bilingual EPUB is archived in Data.'),
+            'three_records': _(
+                'The source remains unchanged. Chinese and bilingual EPUBs '
+                'are added as two separate books.'),
+        }
+
+        def update_variant_storage(index):
+            storage = variant_storage.itemData(index) or 'bundle_data'
+            self.config.update(translation_variant_storage=storage)
+            variant_summary.setText(storage_summaries[storage])
+
+        variant_storage.currentIndexChanged.connect(update_variant_storage)
+        storage = self.config.get(
+            'translation_variant_storage', 'bundle_data')
+        storage_index = variant_storage.findData(storage)
+        variant_storage.setCurrentIndex(max(0, storage_index))
+        update_variant_storage(variant_storage.currentIndex())
+
+        def toggle_variants(checked):
+            variant_storage.setEnabled(checked)
+            variant_summary.setEnabled(checked)
+            self.config.update(translation_variants_enabled=checked)
+
+        variants_enabled.toggled.connect(toggle_variants)
+        variants_enabled.setChecked(self.config.get(
+            'translation_variants_enabled', False))
+        toggle_variants(variants_enabled.isChecked())
+
         def choose_output_type(checked):
             output_path_button.setDisabled(checked)
             self.output_path_entry.setDisabled(checked)
+            variants_group.setEnabled(checked)
+            if not checked and variants_enabled.isChecked():
+                variants_enabled.setChecked(False)
             self.config.update(to_library=checked)
         library_radio.toggled.connect(choose_output_type)
 

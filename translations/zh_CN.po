@@ -930,5 +930,50 @@ msgstr "缓存管理器"
 msgid "Choose Translation Mode"
 msgstr "选择翻译模式"
 
+msgid "Translation Variants"
+msgstr "翻译版本"
+
+msgid "Translation variants currently require a Calibre library book with EPUB input, EPUB output, and Library as the output path."
+msgstr "翻译版本目前仅支持 Calibre 书库中的书籍，且输入和输出都必须是 EPUB，输出路径必须选择“书库”。"
+
+msgid "Preset A was changed to B for this run because the source book has highlights or reading progress (or their status could not be verified). The source EPUB will remain unchanged."
+msgstr "本次已将方案 A 自动改为 B，因为原书包含标注或阅读进度（或无法确认其状态）。原始 EPUB 将保持不变。"
+
+msgid "Could not stage the source EPUB for variant output."
+msgstr "无法暂存原始 EPUB 以生成多版本输出。"
+
+msgid "[{} > {}] Translating variants for \"{}\""
+msgstr "[{} > {}] 正在生成“{}”的翻译版本"
+
+msgid "The translated EPUBs were created, but storing the three variants failed. The source book was kept or restored."
+msgstr "翻译 EPUB 已生成，但保存三个版本时失败。原书已保留或还原。"
+
+msgid "The translation variants for \"{}\" were completed. Do you want to open the Chinese book?"
+msgstr "“{}”的翻译版本已完成。要打开纯中文版吗？"
+
+msgid "Create source, translation-only, and bilingual versions"
+msgstr "创建原文、纯译文和双语三个版本"
+
+msgid "Variant Storage"
+msgstr "版本存放方式"
+
+msgid "A — Chinese main file; source and bilingual in Data"
+msgstr "A — 中文作为主文件；原文和双语版存于 Data"
+
+msgid "B — Keep source; add Chinese book; bilingual in Data"
+msgstr "B — 保留原书；新增中文版；双语版存于 Data"
+
+msgid "C — Source, Chinese, and bilingual as separate books"
+msgstr "C — 原文、中文和双语各自成书"
+
+msgid "The Chinese EPUB replaces the main EPUB. The source and bilingual EPUBs are archived in Data and must be exported to read. The source leaves full-text search. If highlights or reading progress exist, this run automatically uses B."
+msgstr "纯中文 EPUB 取代主 EPUB；原文和双语版封存于 Data，需导出后阅读，原文也不再参与全文搜索。若已有标注或阅读进度，本次会自动改用 B。"
+
+msgid "The source book remains unchanged. A linked Chinese book is added; its bilingual EPUB is archived in Data."
+msgstr "原书保持不变；新增一条可追溯来源的中文版，双语 EPUB 封存于其 Data。"
+
+msgid "The source remains unchanged. Chinese and bilingual EPUBs are added as two separate books."
+msgstr "原书保持不变；纯中文版和双语版分别新增为两本书。"
+
 #~ msgid "HTTP Proxy"
 #~ msgstr "HTTP 代理"

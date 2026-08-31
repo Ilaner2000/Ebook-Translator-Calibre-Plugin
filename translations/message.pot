@@ -1217,3 +1217,63 @@ msgstr ""
 #: ui.py:166
 msgid "Choose Translation Mode"
 msgstr ""
+
+#: lib/conversion.py setting.py
+msgid "Translation Variants"
+msgstr ""
+
+#: lib/conversion.py
+msgid "Translation variants currently require a Calibre library book with EPUB input, EPUB output, and Library as the output path."
+msgstr ""
+
+#: lib/conversion.py
+msgid "Preset A was changed to B for this run because the source book has highlights or reading progress (or their status could not be verified). The source EPUB will remain unchanged."
+msgstr ""
+
+#: lib/conversion.py
+msgid "Could not stage the source EPUB for variant output."
+msgstr ""
+
+#: lib/conversion.py
+msgid "[{} > {}] Translating variants for \"{}\""
+msgstr ""
+
+#: lib/conversion.py
+msgid "The translated EPUBs were created, but storing the three variants failed. The source book was kept or restored."
+msgstr ""
+
+#: lib/conversion.py
+msgid "The translation variants for \"{}\" were completed. Do you want to open the Chinese book?"
+msgstr ""
+
+#: setting.py
+msgid "Create source, translation-only, and bilingual versions"
+msgstr ""
+
+#: setting.py
+msgid "Variant Storage"
+msgstr ""
+
+#: setting.py
+msgid "A — Chinese main file; source and bilingual in Data"
+msgstr ""
+
+#: setting.py
+msgid "B — Keep source; add Chinese book; bilingual in Data"
+msgstr ""
+
+#: setting.py
+msgid "C — Source, Chinese, and bilingual as separate books"
+msgstr ""
+
+#: setting.py
+msgid "The Chinese EPUB replaces the main EPUB. The source and bilingual EPUBs are archived in Data and must be exported to read. The source leaves full-text search. If highlights or reading progress exist, this run automatically uses B."
+msgstr ""
+
+#: setting.py
+msgid "The source book remains unchanged. A linked Chinese book is added; its bilingual EPUB is archived in Data."
+msgstr ""
+
+#: setting.py
+msgid "The source remains unchanged. Chinese and bilingual EPUBs are added as two separate books."
+msgstr ""

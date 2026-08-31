@@ -1,11 +1,18 @@
 import os
 import os.path
+import json
+import shutil
+import hashlib
+import traceback
 from types import MethodType
 from typing import Callable
 from tempfile import gettempdir
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from calibre import sanitize_file_name  # type: ignore
-from calibre.gui2 import Dispatcher  # type: ignore
+from calibre.gui2 import (  # type: ignore
+    Dispatcher, error_dialog, warning_dialog)
 from calibre.constants import DEBUG, __version__  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 from calibre.utils.logging import Stream  # type: ignore
@@ -28,6 +35,30 @@ from .exception import ConversionAbort
 
 
 load_translations()  # type: ignore
+
+
+variant_storage_values = (
+    'bundle_data', 'linked_pair', 'three_records')
+
+
+def temporary_path(suffix):
+    return PersistentTemporaryFile(suffix=suffix).name
+
+
+def temporary_copy(path, suffix):
+    temp = PersistentTemporaryFile(suffix=suffix)
+    with open(path, 'rb') as source:
+        shutil.copyfileobj(source, temp)
+    temp.close()
+    return temp.name
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class PrepareStream:
@@ -246,6 +277,82 @@ def convert_item(
     cache.done()
 
 
+def convert_variants_item(
+        ebook_title, input_path, translation_output_path,
+        bilingual_output_path, source_lang, target_lang, cache_only,
+        is_batch, format, encoding, direction, bilingual_gap, notification):
+    """Render translation-only and bilingual EPUBs from one cache context.
+
+    The first render may call the translation provider. The second render is
+    forced to cache-only and reuses the same TranslationCache instance.
+    """
+    translator = get_translator()
+    translator.set_source_lang(source_lang)
+    translator.set_target_lang(target_lang)
+
+    def create_handler(position, vertical_gap=0.0):
+        handler = get_element_handler(
+            translator.placeholder, translator.separator, direction)
+        handler.position = position
+        handler.set_vertical_gap(vertical_gap)
+        handler.set_translation_lang(
+            translator.get_iso639_target_code(target_lang))
+        return handler
+
+    translation_handler = create_handler('only')
+    merge_length = str(translation_handler.get_merge_length())
+    _encoding = ''
+    if encoding.lower() != 'utf-8':
+        _encoding = encoding.lower()
+    cache_id = uid(
+        input_path + translator.name + target_lang + merge_length + _encoding)
+    cache = get_cache(cache_id)
+    cache.set_cache_only(cache_only)
+    cache.set_info('title', ebook_title)
+    cache.set_info('engine_name', translator.name)
+    cache.set_info('target_lang', target_lang)
+    cache.set_info('merge_length', merge_length)
+    cache.set_info('plugin_version', EbookTranslator.__version__)
+    cache.set_info('calibre_version', __version__)
+
+    translation = get_translation(
+        translator, lambda text, error=False: log.info(text))
+    translation.set_batch(is_batch)
+    translation.set_callback(cache.update_paragraph)
+
+    def get_debug_info(output_path):
+        debug_info = '{0}\n| Diagnosis Information\n{0}'.format(sep())
+        debug_info += '\n| Calibre Version: %s\n' % __version__
+        debug_info += '| Plugin Version: %s\n' % EbookTranslator.__version__
+        debug_info += '| Translation Engine: %s\n' % translator.name
+        debug_info += '| Source Language: %s\n' % source_lang
+        debug_info += '| Target Language: %s\n' % target_lang
+        debug_info += '| Encoding: %s\n' % encoding
+        debug_info += '| Cache Enabled: %s\n' % cache.is_persistence()
+        debug_info += '| Merging Length: %s\n' % merge_length
+        debug_info += '| Input Path: %s\n' % input_path
+        debug_info += '| Output Path: %s' % output_path
+        return debug_info
+
+    handler: dict[str, Callable] | None = extra_formats.get(format)
+    convertor = convert_book if handler is None else handler['convertor']
+    convertor(
+        input_path, translation_output_path, translation,
+        translation_handler, cache, get_debug_info(translation_output_path),
+        encoding, notification)
+
+    cache.set_cache_only(True)
+    # Translation.handle() accumulates ``total``. Reusing the same object is
+    # important for one provider/cache context, but each render needs an
+    # independent progress total.
+    translation.total = 0
+    bilingual_handler = create_handler('below', bilingual_gap)
+    convertor(
+        input_path, bilingual_output_path, translation, bilingual_handler,
+        cache, get_debug_info(bilingual_output_path), encoding, notification)
+    cache.done()
+
+
 class ConversionWorker:
     def __init__(self, gui, icon):
         self.gui = gui
@@ -257,6 +364,9 @@ class ConversionWorker:
 
     def translate_ebook(self, ebook, cache_only=False, is_batch=False):
         input_path = ebook.get_input_path()
+        if self.config.get('translation_variants_enabled', False):
+            return self.translate_variants(
+                ebook, input_path, cache_only, is_batch)
         if not self.config.get('to_library'):
             filename = sanitize_file_name(ebook.title[:200])
             output_path = self.config.get('output_path')
@@ -281,6 +391,288 @@ class ConversionWorker:
                 ebook.source_lang, ebook.target_lang, ebook.title)))
         self.working_jobs[job] = (ebook, output_path)
 
+    def translate_variants(
+            self, ebook, input_path, cache_only=False, is_batch=False):
+        scope_is_valid = (
+            self.config.get('to_library') and ebook.id is not None and
+            ebook.input_format.lower() == 'epub' and
+            ebook.output_format.lower() == 'epub')
+        if not scope_is_valid:
+            error_dialog(
+                self.gui, _('Translation Variants'), _(
+                    'Translation variants currently require a Calibre '
+                    'library book with EPUB input, EPUB output, and Library '
+                    'as the output path.'), show=True)
+            return None
+
+        requested_storage = self.config.get(
+            'translation_variant_storage', 'bundle_data')
+        if requested_storage not in variant_storage_values:
+            requested_storage = 'bundle_data'
+        effective_storage = requested_storage
+        if requested_storage == 'bundle_data':
+            try:
+                has_annotations = bool(
+                    self.api.annotation_count_for_book(ebook.id))
+                has_last_read = bool(self.api.get_last_read_positions(
+                    ebook.id, fmt='EPUB', limit=1))
+            except Exception:
+                # Fail safe: inability to prove the record has no reading
+                # assets must never authorize replacing its main EPUB.
+                has_annotations = has_last_read = True
+            if has_annotations or has_last_read:
+                effective_storage = 'linked_pair'
+                warning_dialog(
+                    self.gui, _('Translation Variants'), _(
+                        'Preset A was changed to B for this run because the '
+                        'source book has highlights or reading progress (or '
+                        'their status could not be verified). The source '
+                        'EPUB will remain unchanged.'), show=True)
+
+        run_id = '%s-%s' % (
+            datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'),
+            uuid4().hex[:8])
+        try:
+            source_snapshot = temporary_copy(input_path, '.source.epub')
+            translation_path = temporary_path('.translation.epub')
+            bilingual_path = temporary_path('.bilingual.epub')
+        except Exception:
+            error_dialog(
+                self.gui, _('Translation Variants'), _(
+                    'Could not stage the source EPUB for variant output.'),
+                det_msg=traceback.format_exc(), show=True)
+            return None
+
+        job = self.gui.job_manager.run_job(
+            Dispatcher(self.translate_done),
+            'arbitrary_n',
+            args=(
+                'calibre_plugins.ebook_translator.lib.conversion',
+                'convert_variants_item',
+                (ebook.title, input_path, translation_path, bilingual_path,
+                 ebook.source_lang, ebook.target_lang, cache_only, is_batch,
+                 ebook.input_format, ebook.encoding,
+                 ebook.target_direction,
+                 self.config.get('vertical_gap', 1.0))),
+            description=(_('[{} > {}] Translating variants for "{}"').format(
+                ebook.source_lang, ebook.target_lang, ebook.title)))
+        self.working_jobs[job] = (ebook, {
+            'variants': True,
+            'source_path': source_snapshot,
+            'translation_path': translation_path,
+            'bilingual_path': bilingual_path,
+            'requested_storage': requested_storage,
+            'effective_storage': effective_storage,
+            'run_id': run_id,
+        })
+        return job
+
+    def _prepare_variant_metadata(
+            self, path, ebook, kind, source_uuid):
+        with open(path, 'r+b') as file:
+            metadata = get_metadata(file, 'epub')
+            base_title = ebook.custom_title or metadata.title or ebook.title
+            if kind == 'translation':
+                title = '%s [%s]' % (base_title, ebook.target_lang)
+            else:
+                title = '%s [%s + %s]' % (
+                    base_title, _('Original'), ebook.target_lang)
+            metadata.title = title
+            ebook_metadata_config = self.config.get('ebook_metadata') or {}
+            if ebook_metadata_config.get('lang_code') and ebook.lang_code:
+                metadata.language = ebook.lang_code
+            subjects = ebook_metadata_config.get('subjects') or []
+            tags = list(metadata.tags or [])
+            for tag in subjects + [
+                    'Translated by Ebook Translator: '
+                    'https://translator.bookfere.com']:
+                if tag not in tags:
+                    tags.append(tag)
+            metadata.tags = tags
+            metadata.set_identifier(
+                'ebook-translator-source', str(source_uuid))
+            set_metadata(file, metadata, 'epub')
+        return metadata, title
+
+    def _create_variant_book(self, metadata, path):
+        book_id = self.db.create_book_entry(metadata)
+        try:
+            added = self.api.add_format(
+                book_id, 'EPUB', path, run_hooks=False)
+            if added is False:
+                raise RuntimeError(
+                    'Could not add EPUB format to derivative book')
+        except Exception:
+            self._remove_created_books([book_id])
+            raise
+        return book_id
+
+    def _write_manifest(self, manifest):
+        temp = PersistentTemporaryFile(suffix='.manifest.json')
+        temp.write(json.dumps(
+            manifest, ensure_ascii=False, indent=2,
+            sort_keys=True).encode('utf-8'))
+        temp.close()
+        return temp.name
+
+    def _add_verified_extra_files(self, book_id, files):
+        self.api.add_extra_files(
+            book_id, files, replace=False, auto_rename=False)
+        listed = {
+            item.relpath: item.file_path for item in
+            self.api.list_extra_files(book_id, use_cache=False)}
+        for relpath, source_path in files.items():
+            stored_path = listed.get(relpath)
+            if stored_path is None:
+                raise RuntimeError(
+                    'Missing stored variant data file: %s' % relpath)
+            if file_sha256(source_path) != file_sha256(stored_path):
+                raise RuntimeError(
+                    'Stored variant data hash mismatch: %s' % relpath)
+
+    def _remove_extra_files(self, book_id, relpaths):
+        try:
+            self.api.remove_extra_files(
+                book_id, list(relpaths), permanent=False)
+        except Exception as error:
+            log.warn('Could not clean incomplete variant data:', error)
+
+    def _remove_created_books(self, book_ids):
+        if not book_ids:
+            return
+        try:
+            self.api.remove_books(list(book_ids), permanent=False)
+        except Exception as error:
+            log.warn('Could not trash incomplete variant books:', error)
+
+    def _variant_manifest(
+            self, ebook, payload, source_uuid, derivative_book_ids):
+        # The configured value is empty when the built-in default is used.
+        # Record the engine that will actually be selected, not null.
+        engine_name = self.config.get('translate_engine') or \
+            get_translator().name
+        engine_preferences = self.config.get('engine_preferences') or {}
+        model = (engine_preferences.get(engine_name) or {}).get('model')
+        plugin_version = str(EbookTranslator.__version__)
+        return {
+            'schema_version': 1,
+            'run_id': payload['run_id'],
+            'created_at': datetime.now(timezone.utc).isoformat(),
+            'source_book_id': ebook.id,
+            'source_uuid': str(source_uuid),
+            'derivative_book_ids': derivative_book_ids,
+            'requested_storage': payload['requested_storage'],
+            'effective_storage': payload['effective_storage'],
+            'source_language': ebook.source_lang,
+            'target_language': ebook.target_lang,
+            'target_language_code': ebook.lang_code,
+            'translation_engine': engine_name,
+            'model': model,
+            'merge_enabled': self.config.get('merge_enabled', False),
+            'merge_length': self.config.get('merge_length'),
+            'bilingual_position': 'below',
+            'vertical_gap_em': self.config.get('vertical_gap', 1.0),
+            'plugin_version': plugin_version,
+            'calibre_version': __version__,
+            'sha256': {
+                'source': file_sha256(payload['source_path']),
+                'translation': file_sha256(payload['translation_path']),
+                'bilingual': file_sha256(payload['bilingual_path']),
+            },
+        }
+
+    def _store_variants(self, ebook, payload):
+        source_id = ebook.id
+        source_uuid = self.api.field_for('uuid', source_id) or source_id
+        translation_metadata, translation_title = \
+            self._prepare_variant_metadata(
+                payload['translation_path'], ebook, 'translation',
+                source_uuid)
+        bilingual_metadata, _ = self._prepare_variant_metadata(
+            payload['bilingual_path'], ebook, 'bilingual', source_uuid)
+        namespace = 'translation-variants/%s' % payload['run_id']
+        source_relpath = '%s/source.epub' % namespace
+        bilingual_relpath = '%s/bilingual.%s.epub' % (
+            namespace, ebook.lang_code or 'target')
+        manifest_relpath = '%s/manifest.json' % namespace
+        storage = payload['effective_storage']
+
+        if storage == 'bundle_data':
+            derivative_ids = {
+                'translation': source_id,
+                'bilingual': None,
+            }
+            manifest_path = self._write_manifest(self._variant_manifest(
+                ebook, payload, source_uuid, derivative_ids))
+            files = {
+                source_relpath: payload['source_path'],
+                bilingual_relpath: payload['bilingual_path'],
+                manifest_relpath: manifest_path,
+            }
+            try:
+                self._add_verified_extra_files(source_id, files)
+            except Exception:
+                self._remove_extra_files(source_id, files.keys())
+                raise
+            try:
+                added = self.api.add_format(
+                    source_id, 'EPUB', payload['translation_path'],
+                    replace=True, run_hooks=False)
+                if added is False:
+                    raise RuntimeError(
+                        'Could not replace source EPUB with translation')
+            except Exception as replace_error:
+                try:
+                    # Restoring from the separately staged source snapshot is
+                    # safe even when the failed replace did not mutate data.
+                    restored = self.api.add_format(
+                        source_id, 'EPUB', payload['source_path'],
+                        replace=True, run_hooks=False)
+                    if restored is False:
+                        raise RuntimeError(
+                            'Calibre rejected the source EPUB restoration')
+                except Exception as restore_error:
+                    # Keep the verified source Data file for manual recovery.
+                    raise RuntimeError(
+                        'Replacing and restoring the source EPUB both failed; '
+                        'the verified source remains in %s' % source_relpath
+                    ) from restore_error
+                self._remove_extra_files(source_id, files.keys())
+                raise replace_error
+            model = self.gui.library_view.model()
+            if hasattr(model, 'refresh_ids'):
+                model.refresh_ids({source_id})
+            output_path = self.api.format_abspath(source_id, 'EPUB')
+            return output_path, translation_title, 0
+
+        created_ids = []
+        try:
+            translation_id = self._create_variant_book(
+                translation_metadata, payload['translation_path'])
+            created_ids.append(translation_id)
+            bilingual_id = None
+            if storage == 'three_records':
+                bilingual_id = self._create_variant_book(
+                    bilingual_metadata, payload['bilingual_path'])
+                created_ids.append(bilingual_id)
+            derivative_ids = {
+                'translation': translation_id,
+                'bilingual': bilingual_id,
+            }
+            manifest_path = self._write_manifest(self._variant_manifest(
+                ebook, payload, source_uuid, derivative_ids))
+            files = {manifest_relpath: manifest_path}
+            if storage == 'linked_pair':
+                files[bilingual_relpath] = payload['bilingual_path']
+            self._add_verified_extra_files(translation_id, files)
+        except Exception:
+            self._remove_created_books(created_ids)
+            raise
+
+        self.gui.library_view.model().books_added(len(created_ids))
+        output_path = self.api.format_abspath(translation_id, 'EPUB')
+        return output_path, translation_title, len(created_ids)
+
     def translate_done(self, job):
         ebook, output_path = self.working_jobs.pop(job)
 
@@ -288,6 +680,36 @@ class ConversionWorker:
             if not DEBUG:
                 self.gui.job_exception(
                     job, dialog_title=_('Translation job failed'))
+            return
+
+        if isinstance(output_path, dict) and output_path.get('variants'):
+            try:
+                variant_output_path, ebook_title, created_count = \
+                    self._store_variants(ebook, output_path)
+            except Exception:
+                error_dialog(
+                    self.gui, _('Translation Variants'), _(
+                        'The translated EPUBs were created, but storing the '
+                        'three variants failed. The source book was kept or '
+                        'restored.'), det_msg=traceback.format_exc(), show=True)
+                return
+            self.gui.status_bar.show_message(
+                job.description + ' ' + _('completed'), 5000)
+
+            def open_variant(payload):
+                payload('ebook-viewer', kwargs={
+                    'args': ['ebook-viewer', variant_output_path]})
+
+            if self.config.get('show_notification', True):
+                self.gui.proceed_question(
+                    open_variant,
+                    self.gui.job_manager.launch_gui_app,
+                    job.log_path,
+                    _('Ebook Translation Log'), _('Translation Completed'),
+                    _('The translation variants for "{}" were completed. '
+                      'Do you want to open the Chinese book?').format(
+                          ebook_title),
+                    log_is_file=True, icon=self.icon, auto_hide_after=10)
             return
 
         # TODO: Try to use the calibre generated metadata file.
