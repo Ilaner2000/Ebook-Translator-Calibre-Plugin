@@ -286,7 +286,10 @@ class PageElement(Element):
             gap = ('%.2f' % self.vertical_gap).rstrip('0').rstrip('.')
             declarations = []
             if name in inline_elements and apply_inline_gap:
-                declarations.append('display:block')
+                # The surrounding <br> or group-element branch already owns
+                # the line break. Inline-block makes vertical padding affect
+                # line height without adding another block break.
+                declarations.append('display:inline-block')
                 declarations.append('padding-%s:%sem' % (edge, gap))
             elif name not in inline_elements:
                 declarations.append('margin-%s:%sem' % (edge, gap))

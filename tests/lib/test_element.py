@@ -720,7 +720,7 @@ epub:type="pagebreak"/>b</code></p></body>
         item.add_translation('ITEM')
         item_translation = xhtml.find('.//x:li/x:span', namespaces=ns)
         self.assertEqual(
-            'display:block;padding-top:1em',
+            'display:inline-block;padding-top:1em',
             item_translation.get('style'))
 
         cell = PageElement(xhtml.find('.//x:td', namespaces=ns), 'p1')
@@ -729,7 +729,7 @@ epub:type="pagebreak"/>b</code></p></body>
         cell.add_translation('CELL')
         cell_translation = xhtml.find('.//x:td/x:span', namespaces=ns)
         self.assertEqual(
-            'display:block;padding-bottom:0.5em',
+            'display:inline-block;padding-bottom:0.5em',
             cell_translation.get('style'))
 
         inline = PageElement(xhtml.find('.//x:p/x:span', namespaces=ns), 'p1')
@@ -770,7 +770,7 @@ epub:type="pagebreak"/>b</code></p></body>
         self.assertEqual(2, len(translations))
         for translation in translations:
             self.assertEqual(
-                'display:block;padding-top:1em',
+                'display:inline-block;padding-top:1em',
                 translation.get('style'))
 
     def test_vertical_gap_is_ignored_for_only_and_side_by_side(self):
