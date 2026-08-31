@@ -26,6 +26,7 @@ defaults: dict[str, Any] = {
     'log_translation': True,
     'show_notification': True,
     'translation_position': None,
+    'vertical_gap': 0.0,
     'column_gap': {
         '_type': 'percentage',
         'percentage': 10,

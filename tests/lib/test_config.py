@@ -25,6 +25,7 @@ class TestFunction(unittest.TestCase):
             'log_translation': True,
             'show_notification': True,
             'translation_position': None,
+            'vertical_gap': 0.0,
             'column_gap': {
                 '_type': 'percentage',
                 'percentage': 10,
@@ -142,6 +143,7 @@ class TestConfig(unittest.TestCase):
         self.assertEqual({'b2': 2}, self.config.get('b.b1'))
         self.assertEqual(2, self.config.get('b.b1.b2'))
         self.assertIsNone(self.config.get('translation_position'))
+        self.assertEqual(0.0, self.config.get('vertical_gap'))
 
     def test_set(self):
         self.config.preferences = {

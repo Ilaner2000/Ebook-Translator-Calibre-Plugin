@@ -857,18 +857,30 @@ class TranslationSetting(QDialog):
         position_setup.setVisible(False)
         position_setup_layout = QHBoxLayout(position_setup)
         position_setup_layout.setContentsMargins(0, 0, 0, 0)
+        column_gap_label = QLabel(_('Column Gap'))
         column_gap_type = QComboBox()
         column_gap_value = QSpinBox()
         column_gap_value.setRange(1, 100)
-        position_setup_layout.addWidget(QLabel(_('Column Gap')))
+        position_setup_layout.addWidget(column_gap_label)
         position_setup_layout.addWidget(column_gap_type)
         position_setup_layout.addWidget(column_gap_value)
         percentage_unit = QLabel('%')
         position_setup_layout.addWidget(percentage_unit)
+
+        vertical_gap_label = QLabel(_('Vertical Gap'))
+        vertical_gap_value = QDoubleSpinBox()
+        vertical_gap_value.setRange(0.0, 3.0)
+        vertical_gap_value.setDecimals(2)
+        vertical_gap_value.setSingleStep(0.25)
+        vertical_gap_value.setSuffix(' em')
+        vertical_gap_value.setValue(self.config.get('vertical_gap', 0.0))
+        position_setup_layout.addWidget(vertical_gap_label)
+        position_setup_layout.addWidget(vertical_gap_value)
         position_setup_layout.addStretch(1)
 
         self.disable_wheel_event(column_gap_type)
         self.disable_wheel_event(column_gap_value)
+        self.disable_wheel_event(vertical_gap_value)
 
         column_gap_type.addItem(_('Percentage'), 'percentage')
         column_gap_type.addItem(_('Space count'), 'space_count')
@@ -895,6 +907,11 @@ class TranslationSetting(QDialog):
             column_gap_config.update(_type=gap_type)
             self.config.update(column_gap=column_gap_config)
         column_gap_type.currentIndexChanged.connect(change_column_gap_type)
+
+        def change_vertical_gap_value(value):
+            self.config.update(vertical_gap=value)
+            position_samples_layout.setSpacing(10 + round(value * 18))
+        vertical_gap_value.valueChanged.connect(change_vertical_gap_value)
 
         position_preview = QWidget()
         position_preview_layout = QVBoxLayout(position_preview)
@@ -936,7 +953,19 @@ class TranslationSetting(QDialog):
             original_sample.setVisible(btn_id != 4)
             position_samples.layout().setDirection(
                 directions[btn_id] if btn_id != 4 else directions[0])
-            position_setup.setVisible(btn_id in [2, 3])
+            is_column = btn_id in [2, 3]
+            is_vertical = btn_id in [0, 1]
+            position_setup.setVisible(is_column or is_vertical)
+            for control in (
+                    column_gap_label, column_gap_type, column_gap_value):
+                control.setVisible(is_column)
+            percentage_unit.setVisible(
+                is_column and column_gap_type.currentData() == 'percentage')
+            vertical_gap_label.setVisible(is_vertical)
+            vertical_gap_value.setVisible(is_vertical)
+            position_samples_layout.setSpacing(
+                10 + round(vertical_gap_value.value() * 18)
+                if is_vertical else 10)
             self.config.update(translation_position=position_map.get(btn_id))
         choose_option(position_btn_group.checkedId())
         position_btn_group.idClicked.connect(choose_option)

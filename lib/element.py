@@ -13,6 +13,11 @@ from .utils import (
 from .config import get_config
 
 
+inline_elements = (
+    'a', 'em', 'strong', 'small', 's', 'cite', 'q', 'time', 'samp',
+    'i', 'b', 'u', 'mark', 'span', 'data', 'del', 'ins')
+
+
 def get_string(element, remove_ns=False):
     element.text = element.text or ''  # prevent auto-closing empty elements
     markup = trim(etree.tostring(
@@ -34,6 +39,7 @@ class Element:
         self.reserve_elements = []
         self.original = []
         self.column_gap = None
+        self.vertical_gap = 0.0
 
         self.position = None
         self.target_direction = None
@@ -55,6 +61,12 @@ class Element:
 
     def set_column_gap(self, values):
         self.column_gap = values
+
+    def set_vertical_gap(self, value):
+        try:
+            self.vertical_gap = max(0.0, min(float(value), 3.0))
+        except (TypeError, ValueError):
+            self.vertical_gap = 0.0
 
     def set_position(self, position):
         self.position = position
@@ -262,8 +274,25 @@ class PageElement(Element):
         new_element.set('dir', self.target_direction or 'auto')
         if self.translation_lang is not None:
             new_element.set('lang', self.translation_lang)
+        style = None
         if self.translation_color is not None:
-            new_element.set('style', 'color:%s' % self.translation_color)
+            # Preserve the existing behavior: a configured translation color
+            # replaces the copied inline style.
+            style = 'color:%s' % self.translation_color
+        if self.vertical_gap > 0 and self.position in ('above', 'below'):
+            if style is None:
+                style = new_element.get('style', '').strip().rstrip(';')
+            edge = 'top' if self.position == 'below' else 'bottom'
+            gap = ('%.2f' % self.vertical_gap).rstrip('0').rstrip('.')
+            declarations = []
+            if name in inline_elements:
+                declarations.append('display:block')
+                declarations.append('padding-%s:%sem' % (edge, gap))
+            else:
+                declarations.append('margin-%s:%sem' % (edge, gap))
+            style = ';'.join(filter(None, (style, *declarations)))
+        if style is not None:
+            new_element.set('style', style)
         return new_element
 
     def add_translation(self, translation=None):
@@ -336,10 +365,7 @@ class PageElement(Element):
                 self.element.append(new_element)
             return
 
-        text_elements = (
-            'a', 'em', 'strong', 'small', 's', 'cite', 'q', 'time', 'samp',
-            'i', 'b', 'u', 'mark', 'span', 'data', 'del', 'ins')
-        is_text_element = element_name in text_elements
+        is_text_element = element_name in inline_elements
 
         # Add translation for left or right position.
         if self.position in ('left', 'right') and not is_text_element:
@@ -647,6 +673,7 @@ class ElementHandler:
         self.original_color = None
         self.translation_color = None
         self.column_gap = None
+        self.vertical_gap = 0.0
 
         self.remove_pattern = None
         self.reserve_pattern = None
@@ -676,6 +703,12 @@ class ElementHandler:
         if isinstance(values, tuple) and len(values) == 2:
             self.column_gap = values
 
+    def set_vertical_gap(self, value):
+        try:
+            self.vertical_gap = max(0.0, min(float(value), 3.0))
+        except (TypeError, ValueError):
+            self.vertical_gap = 0.0
+
     def load_remove_rules(self, rules=[]):
         default_rules = ('rt', 'rp')
         self.remove_pattern = create_xpath(default_rules + tuple(rules))
@@ -697,6 +730,7 @@ class ElementHandler:
             element.set_translation_lang(self.translation_lang)
             element.set_original_color(self.original_color)
             element.set_translation_color(self.translation_color)
+            element.set_vertical_gap(self.vertical_gap)
             if self.column_gap is not None:
                 element.set_column_gap(self.column_gap)
             element.set_remove_pattern(self.remove_pattern)
@@ -753,6 +787,7 @@ class ElementHandlerMerge(ElementHandler):
             element.set_translation_lang(self.translation_lang)
             element.set_original_color(self.original_color)
             element.set_translation_color(self.translation_color)
+            element.set_vertical_gap(self.vertical_gap)
             if self.column_gap is not None:
                 element.set_column_gap(self.column_gap)
             element.set_remove_pattern(self.remove_pattern)
@@ -895,6 +930,7 @@ def get_element_handler(placeholder, separator, direction):
         handler.set_column_gap((gap_type, column_gap.get(gap_type)))
     handler.set_original_color(config.get('original_color'))
     handler.set_translation_color(config.get('translation_color'))
+    handler.set_vertical_gap(config.get('vertical_gap', 0.0))
     handler.load_remove_rules(
         config.get('ignore_rules', config.get('element_rules', [])))
     handler.load_reserve_rules(config.get('reserve_rules', []))

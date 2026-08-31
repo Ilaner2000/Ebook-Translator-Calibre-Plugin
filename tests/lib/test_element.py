@@ -121,6 +121,7 @@ class TestElement(unittest.TestCase):
         self.assertEqual([], self.element.reserve_elements)
         self.assertEqual([], self.element.original)
         self.assertIsNone(self.element.column_gap)
+        self.assertEqual(0.0, self.element.vertical_gap)
         self.assertIsNone(self.element.position)
         self.assertIsNone(self.element.translation_lang)
         self.assertIsNone(self.element.original_color)
@@ -144,6 +145,14 @@ class TestElement(unittest.TestCase):
     def test_set_column_gap(self):
         self.element.set_column_gap(('percentage', 10))
         self.assertEqual(('percentage', 10), self.element.column_gap)
+
+    def test_set_vertical_gap(self):
+        self.element.set_vertical_gap(1.25)
+        self.assertEqual(1.25, self.element.vertical_gap)
+        self.element.set_vertical_gap(4)
+        self.assertEqual(3.0, self.element.vertical_gap)
+        self.element.set_vertical_gap('invalid')
+        self.assertEqual(0.0, self.element.vertical_gap)
 
     def test_set_position(self):
         self.element.set_position('left')
@@ -665,6 +674,88 @@ epub:type="pagebreak"/>b</code></p></body>
         self.assertEqual('color:blue', translation.get('style'))
         self.assertEqual('color:red', original.get('style'))
         self.assertIn('>test<', get_string(translation))
+
+    def test_add_translation_below_with_vertical_gap(self):
+        self.element.position = 'below'
+        self.element.vertical_gap = 1.0
+        self.element.translation_color = 'blue'
+        self.element.add_translation('test')
+
+        original, translation = self.xhtml.findall('.//x:p', namespaces=ns)
+        self.assertIsNone(original.get('style'))
+        self.assertEqual(
+            'color:blue;margin-top:1em', translation.get('style'))
+
+    def test_zero_vertical_gap_preserves_inline_style_exactly(self):
+        self.element.element.set('style', 'font-weight:bold;')
+        self.element.position = 'below'
+        self.element.vertical_gap = 0
+        self.element.add_translation('test')
+
+        original, translation = self.xhtml.findall('.//x:p', namespaces=ns)
+        self.assertEqual('font-weight:bold;', original.get('style'))
+        self.assertEqual('font-weight:bold;', translation.get('style'))
+
+    def test_add_translation_above_with_vertical_gap(self):
+        self.element.position = 'above'
+        self.element.vertical_gap = 0.75
+        self.element.add_translation('test')
+
+        translation, original = self.xhtml.findall('.//x:p', namespaces=ns)
+        self.assertEqual('margin-bottom:0.75em', translation.get('style'))
+        self.assertIsNone(original.get('style'))
+
+    def test_add_translation_group_and_inline_with_vertical_gap(self):
+        xhtml = etree.XML(b"""<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+    <body><ul><li>item</li></ul><table><tr><td>cell</td></tr></table>
+    <p><span>inline</span></p></body>
+</html>""")
+        item = PageElement(xhtml.find('.//x:li', namespaces=ns), 'p1')
+        item.position = 'below'
+        item.vertical_gap = 1
+        item.add_translation('ITEM')
+        item_translation = xhtml.find('.//x:li/x:span', namespaces=ns)
+        self.assertEqual(
+            'display:block;padding-top:1em',
+            item_translation.get('style'))
+
+        cell = PageElement(xhtml.find('.//x:td', namespaces=ns), 'p1')
+        cell.position = 'above'
+        cell.vertical_gap = 0.5
+        cell.add_translation('CELL')
+        cell_translation = xhtml.find('.//x:td/x:span', namespaces=ns)
+        self.assertEqual(
+            'display:block;padding-bottom:0.5em',
+            cell_translation.get('style'))
+
+        inline = PageElement(xhtml.find('.//x:p/x:span', namespaces=ns), 'p1')
+        inline.position = 'below'
+        inline.vertical_gap = 1
+        inline.add_translation('INLINE')
+        inline_elements = xhtml.findall('.//x:p/x:span', namespaces=ns)
+        self.assertEqual(2, len(inline_elements))
+        self.assertEqual(
+            'display:block;padding-top:1em',
+            inline_elements[1].get('style'))
+
+    def test_vertical_gap_is_ignored_for_only_and_side_by_side(self):
+        for position in ('only', 'left', 'right'):
+            with self.subTest(position=position):
+                xhtml = etree.XML(
+                    b'<body xmlns="http://www.w3.org/1999/xhtml"><p>a</p>'
+                    b'</body>')
+                element = PageElement(
+                    xhtml.find('./x:p', namespaces=ns), 'p1')
+                element.position = position
+                element.vertical_gap = 1
+                element.add_translation('A')
+                for translated in xhtml.xpath(
+                        './/*[text()="A"]', namespaces=ns):
+                    self.assertNotIn(
+                        'margin-', translated.get('style', ''))
+                    self.assertNotIn(
+                        'padding-', translated.get('style', ''))
 
     def test_add_translation_right(self):
         self.element.position = 'right'
@@ -1240,6 +1331,7 @@ class TestElementHandler(unittest.TestCase):
         self.assertIsNone(self.handler.original_color)
         self.assertIsNone(self.handler.translation_color)
         self.assertIsNone(self.handler.column_gap)
+        self.assertEqual(0.0, self.handler.vertical_gap)
         self.assertIsNone(self.handler.remove_pattern)
         self.assertIsNone(self.handler.reserve_pattern)
         self.assertEqual({}, self.handler.elements)
@@ -1274,6 +1366,12 @@ class TestElementHandler(unittest.TestCase):
         self.handler.set_column_gap(('percentage', 2))
         self.assertEqual(('percentage', 2), self.handler.column_gap)
 
+    def test_set_vertical_gap(self):
+        self.handler.set_vertical_gap(1.5)
+        self.assertEqual(1.5, self.handler.vertical_gap)
+        self.handler.set_vertical_gap(-1)
+        self.assertEqual(0.0, self.handler.vertical_gap)
+
     def test_load_remove_rules(self):
         self.handler.load_remove_rules()
         self.assertIsNotNone(self.handler.remove_pattern)
@@ -1288,6 +1386,7 @@ class TestElementHandler(unittest.TestCase):
         self.handler.original_color = 'red'
         self.handler.translation_color = 'green'
         self.handler.column_gap = ('percentage', 20)
+        self.handler.vertical_gap = 1.25
         self.handler.load_remove_rules()
         self.handler.load_reserve_rules()
         mock_uid.side_effect = ['m1', 'm2', 'm3', 'm4', 'm5']
@@ -1308,6 +1407,7 @@ class TestElementHandler(unittest.TestCase):
                 self.assertEqual('red', element.original_color)
                 self.assertEqual('green', element.translation_color)
                 self.assertEqual(('percentage', 20), element.column_gap)
+                self.assertEqual(1.25, element.vertical_gap)
 
     @patch('calibre_plugins.ebook_translator.lib.element.uid')
     def test_prepare_translation_contains_ignored_element(self, mock_uid):
