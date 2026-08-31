@@ -957,6 +957,9 @@ msgstr "创建原文、纯译文和双语三个版本"
 msgid "Variant Storage"
 msgstr "版本存放方式"
 
+msgid "Bilingual Gap"
+msgstr "双语间距"
+
 msgid "A — Chinese main file; source and bilingual in Data"
 msgstr "A — 中文作为主文件；原文和双语版存于 Data"
 

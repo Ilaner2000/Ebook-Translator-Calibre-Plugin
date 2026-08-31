@@ -219,6 +219,20 @@ class TranslationSetting(QDialog):
             'three_records')
         storage_layout.addWidget(variant_storage, 1)
         variants_layout.addLayout(storage_layout)
+        variant_gap_layout = QHBoxLayout()
+        variant_gap_layout.addWidget(QLabel(_('Bilingual Gap')))
+        variant_gap = QDoubleSpinBox()
+        variant_gap.setRange(0.0, 3.0)
+        variant_gap.setDecimals(2)
+        variant_gap.setSingleStep(0.25)
+        variant_gap.setSuffix(' em')
+        variant_gap.setValue(self.config.get(
+            'translation_variant_gap', 1.0))
+        variant_gap.valueChanged.connect(lambda value: self.config.update(
+            translation_variant_gap=round(value, 2)))
+        variant_gap_layout.addWidget(variant_gap)
+        variant_gap_layout.addStretch(1)
+        variants_layout.addLayout(variant_gap_layout)
         variant_summary = QLabel()
         variant_summary.setWordWrap(True)
         variants_layout.addWidget(variant_summary)
@@ -252,6 +266,7 @@ class TranslationSetting(QDialog):
 
         def toggle_variants(checked):
             variant_storage.setEnabled(checked)
+            variant_gap.setEnabled(checked)
             variant_summary.setEnabled(checked)
             self.config.update(translation_variants_enabled=checked)
 
@@ -264,8 +279,6 @@ class TranslationSetting(QDialog):
             output_path_button.setDisabled(checked)
             self.output_path_entry.setDisabled(checked)
             variants_group.setEnabled(checked)
-            if not checked and variants_enabled.isChecked():
-                variants_enabled.setChecked(False)
             self.config.update(to_library=checked)
         library_radio.toggled.connect(choose_output_type)
 

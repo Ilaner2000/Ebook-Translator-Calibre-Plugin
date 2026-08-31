@@ -83,7 +83,7 @@ class TestConversionWorker(unittest.TestCase):
         self.worker.config = {
             'to_library': True,
             'translation_variant_storage': 'bundle_data',
-            'vertical_gap': 1.0,
+            'vertical_gap': 0.0,
         }
         self.worker.working_jobs = {}
         self.ebook.id = 7
@@ -109,6 +109,9 @@ class TestConversionWorker(unittest.TestCase):
         payload = self.worker.working_jobs[job][1]
         self.assertEqual('bundle_data', payload['requested_storage'])
         self.assertEqual('linked_pair', payload['effective_storage'])
+        worker_args = self.worker.gui.job_manager.run_job.call_args.kwargs[
+            'args'][2]
+        self.assertEqual(1.0, worker_args[-1])
         mock_warning.assert_called_once()
 
     @patch(module_name + '.temporary_path')
@@ -179,7 +182,10 @@ class TestConversionWorker(unittest.TestCase):
         self.ebook.lang_code = 'zh-Hant'
         self.ebook.source_lang = 'English'
         self.ebook.target_lang = 'Chinese'
-        self.worker.api.field_for.return_value = 'source-uuid'
+        self.worker.api.field_for.side_effect = lambda field, book_id: {
+            'uuid': 'source-uuid',
+            'identifiers': {'isbn': '123'},
+        }.get(field)
         self.worker.api.add_format.return_value = True
         self.worker.api.format_abspath.return_value = '/library/translation.epub'
 
@@ -197,13 +203,14 @@ class TestConversionWorker(unittest.TestCase):
         self.assertEqual('Default Engine', manifest['translation_engine'])
         mock_get_translator.assert_called_once_with()
 
+    @patch(module_name + '.file_sha256', return_value='hash')
     @patch.object(ConversionWorker, '_variant_manifest')
     @patch.object(ConversionWorker, '_write_manifest')
     @patch.object(ConversionWorker, '_add_verified_extra_files')
     @patch.object(ConversionWorker, '_prepare_variant_metadata')
     def test_store_variants_a_replaces_main_after_verified_data(
             self, mock_metadata, mock_add_extra, mock_manifest_file,
-            mock_manifest):
+            mock_manifest, mock_hash):
         self.configure_variant_ebook()
         translation_metadata = Mock()
         bilingual_metadata = Mock()
@@ -222,9 +229,42 @@ class TestConversionWorker(unittest.TestCase):
             'translation-variants/run-1/bilingual.zh-Hant.epub'])
         self.worker.api.add_format.assert_called_once_with(
             7, 'EPUB', '/translation.epub', replace=True, run_hooks=False)
+        self.worker.api.set_field.assert_called_once_with(
+            'identifiers', {7: {
+                'isbn': '123',
+                'ebook-translator-variant': 'translation:run-1',
+            }})
         self.worker.db.create_book_entry.assert_not_called()
         self.assertEqual(
             ('/library/translation.epub', 'Chinese title', 0), result)
+
+    @patch(module_name + '.file_sha256', side_effect=[
+        'expected-hash', 'different-hash'])
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_a_restores_source_on_replace_hash_mismatch(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest, mock_hash):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+
+        with self.assertRaisesRegex(RuntimeError, 'SHA-256'):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('bundle_data'))
+
+        self.assertEqual([
+            call(7, 'EPUB', '/translation.epub',
+                 replace=True, run_hooks=False),
+            call(7, 'EPUB', '/source.epub',
+                 replace=True, run_hooks=False),
+        ], self.worker.api.add_format.call_args_list)
+        self.worker.api.set_field.assert_called_once_with(
+            'identifiers', {7: {'isbn': '123'}})
+        self.worker.api.remove_extra_files.assert_called_once()
 
     @patch.object(ConversionWorker, '_variant_manifest')
     @patch.object(ConversionWorker, '_write_manifest')

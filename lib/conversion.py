@@ -364,7 +364,8 @@ class ConversionWorker:
 
     def translate_ebook(self, ebook, cache_only=False, is_batch=False):
         input_path = ebook.get_input_path()
-        if self.config.get('translation_variants_enabled', False):
+        if self.config.get('translation_variants_enabled', False) and \
+                self.config.get('to_library'):
             return self.translate_variants(
                 ebook, input_path, cache_only, is_batch)
         if not self.config.get('to_library'):
@@ -453,7 +454,7 @@ class ConversionWorker:
                  ebook.source_lang, ebook.target_lang, cache_only, is_batch,
                  ebook.input_format, ebook.encoding,
                  ebook.target_direction,
-                 self.config.get('vertical_gap', 1.0))),
+                 self.config.get('translation_variant_gap', 1.0))),
             description=(_('[{} > {}] Translating variants for "{}"').format(
                 ebook.source_lang, ebook.target_lang, ebook.title)))
         self.working_jobs[job] = (ebook, {
@@ -588,7 +589,7 @@ class ConversionWorker:
             self._prepare_variant_metadata(
                 payload['translation_path'], ebook, 'translation',
                 source_uuid)
-        bilingual_metadata, _ = self._prepare_variant_metadata(
+        bilingual_metadata, _bilingual_title = self._prepare_variant_metadata(
             payload['bilingual_path'], ebook, 'bilingual', source_uuid)
         namespace = 'translation-variants/%s' % payload['run_id']
         source_relpath = '%s/source.epub' % namespace
@@ -598,6 +599,11 @@ class ConversionWorker:
         storage = payload['effective_storage']
 
         if storage == 'bundle_data':
+            original_identifiers = dict(
+                self.api.field_for('identifiers', source_id) or {})
+            marked_identifiers = dict(original_identifiers)
+            marked_identifiers['ebook-translator-variant'] = \
+                'translation:%s' % payload['run_id']
             derivative_ids = {
                 'translation': source_id,
                 'bilingual': None,
@@ -621,6 +627,13 @@ class ConversionWorker:
                 if added is False:
                     raise RuntimeError(
                         'Could not replace source EPUB with translation')
+                output_path = self.api.format_abspath(source_id, 'EPUB')
+                if file_sha256(payload['translation_path']) != \
+                        file_sha256(output_path):
+                    raise RuntimeError(
+                        'Replaced main EPUB failed SHA-256 verification')
+                self.api.set_field(
+                    'identifiers', {source_id: marked_identifiers})
             except Exception as replace_error:
                 try:
                     # Restoring from the separately staged source snapshot is
@@ -631,6 +644,8 @@ class ConversionWorker:
                     if restored is False:
                         raise RuntimeError(
                             'Calibre rejected the source EPUB restoration')
+                    self.api.set_field(
+                        'identifiers', {source_id: original_identifiers})
                 except Exception as restore_error:
                     # Keep the verified source Data file for manual recovery.
                     raise RuntimeError(
@@ -642,7 +657,6 @@ class ConversionWorker:
             model = self.gui.library_view.model()
             if hasattr(model, 'refresh_ids'):
                 model.refresh_ids({source_id})
-            output_path = self.api.format_abspath(source_id, 'EPUB')
             return output_path, translation_title, 0
 
         created_ids = []
