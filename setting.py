@@ -217,6 +217,7 @@ class TranslationSetting(QDialog):
         variant_storage.addItem(_(
             'C — Source, Chinese, and bilingual as separate books'),
             'three_records')
+        self.disable_wheel_event(variant_storage)
         storage_layout.addWidget(variant_storage, 1)
         variants_layout.addLayout(storage_layout)
         variant_gap_layout = QHBoxLayout()
@@ -226,6 +227,7 @@ class TranslationSetting(QDialog):
         variant_gap.setDecimals(2)
         variant_gap.setSingleStep(0.25)
         variant_gap.setSuffix(' em')
+        self.disable_wheel_event(variant_gap)
         variant_gap.setValue(self.config.get(
             'translation_variant_gap', 1.0))
         variant_gap.valueChanged.connect(lambda value: self.config.update(
