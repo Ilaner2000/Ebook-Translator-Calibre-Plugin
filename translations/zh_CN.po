@@ -936,8 +936,14 @@ msgstr "翻译版本"
 msgid "Translation variants currently require a Calibre library book with EPUB input, EPUB output, and Library as the output path."
 msgstr "翻译版本目前仅支持 Calibre 书库中的书籍，且输入和输出都必须是 EPUB，输出路径必须选择“书库”。"
 
-msgid "Preset A was changed to B for this run because the source book has highlights or reading progress (or their status could not be verified). The source EPUB will remain unchanged."
-msgstr "本次已将方案 A 自动改为 B，因为原书包含标注或阅读进度（或无法确认其状态）。原始 EPUB 将保持不变。"
+msgid "The source book has highlights or reading progress, or their status could not be verified. Preset A replaces the main EPUB and may make those reading assets unusable. Do you want to keep preset A for this run?"
+msgstr "原书已有标注或阅读进度，或无法确认其状态。方案 A 会替换主 EPUB，可能使这些阅读数据失效。本次仍要使用方案 A 吗？"
+
+msgid "Keep preset A"
+msgstr "仍使用方案 A"
+
+msgid "Use preset B (safe)"
+msgstr "改用方案 B（安全）"
 
 msgid "Could not stage the source EPUB for variant output."
 msgstr "无法暂存原始 EPUB 以生成多版本输出。"

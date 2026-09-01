@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from calibre import sanitize_file_name  # type: ignore
 from calibre.gui2 import (  # type: ignore
-    Dispatcher, error_dialog, warning_dialog)
+    Dispatcher, error_dialog, question_dialog)
 from calibre.constants import DEBUG, __version__  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 from calibre.utils.logging import Stream  # type: ignore
@@ -419,16 +419,22 @@ class ConversionWorker:
                     ebook.id, fmt='EPUB', limit=1))
             except Exception:
                 # Fail safe: inability to prove the record has no reading
-                # assets must never authorize replacing its main EPUB.
+                # assets must require an explicit user decision before
+                # replacing its main EPUB.
                 has_annotations = has_last_read = True
             if has_annotations or has_last_read:
-                effective_storage = 'linked_pair'
-                warning_dialog(
+                keep_preset_a = question_dialog(
                     self.gui, _('Translation Variants'), _(
-                        'Preset A was changed to B for this run because the '
-                        'source book has highlights or reading progress (or '
-                        'their status could not be verified). The source '
-                        'EPUB will remain unchanged.'), show=True)
+                        'The source book has highlights or reading progress, '
+                        'or their status could not be verified. Preset A '
+                        'replaces the main EPUB and may make those reading '
+                        'assets unusable. Do you want to keep preset A for '
+                        'this run?'),
+                    default_yes=False,
+                    yes_text=_('Keep preset A'),
+                    no_text=_('Use preset B (safe)'))
+                if not keep_preset_a:
+                    effective_storage = 'linked_pair'
 
         run_id = '%s-%s' % (
             datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'),

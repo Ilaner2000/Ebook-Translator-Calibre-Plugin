@@ -1227,7 +1227,15 @@ msgid "Translation variants currently require a Calibre library book with EPUB i
 msgstr ""
 
 #: lib/conversion.py
-msgid "Preset A was changed to B for this run because the source book has highlights or reading progress (or their status could not be verified). The source EPUB will remain unchanged."
+msgid "The source book has highlights or reading progress, or their status could not be verified. Preset A replaces the main EPUB and may make those reading assets unusable. Do you want to keep preset A for this run?"
+msgstr ""
+
+#: lib/conversion.py
+msgid "Keep preset A"
+msgstr ""
+
+#: lib/conversion.py
+msgid "Use preset B (safe)"
 msgstr ""
 
 #: lib/conversion.py

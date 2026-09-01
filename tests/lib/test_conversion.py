@@ -77,13 +77,96 @@ class TestConversionWorker(unittest.TestCase):
 
     @patch(module_name + '.temporary_path')
     @patch(module_name + '.temporary_copy')
-    @patch(module_name + '.warning_dialog')
+    @patch(module_name + '.question_dialog')
     def test_translate_variants_changes_a_to_b_for_annotations(
-            self, mock_warning, mock_copy, mock_temp_path):
+            self, mock_question, mock_copy, mock_temp_path):
         self.worker.config = {
             'to_library': True,
             'translation_variant_storage': 'bundle_data',
             'vertical_gap': 0.0,
+        }
+        self.worker.working_jobs = {}
+        self.ebook.id = 7
+        self.ebook.title = 'Title'
+        self.ebook.input_format = 'epub'
+        self.ebook.output_format = 'epub'
+        self.ebook.source_lang = 'English'
+        self.ebook.target_lang = 'Chinese'
+        self.ebook.encoding = 'utf-8'
+        self.ebook.target_direction = 'auto'
+        self.worker.api.annotation_count_for_book.return_value = 1
+        self.worker.api.get_last_read_positions.return_value = []
+        mock_question.return_value = False
+        mock_copy.return_value = '/source.epub'
+        mock_temp_path.side_effect = [
+            '/translation.epub', '/bilingual.epub']
+        job = Mock()
+        self.worker.gui.job_manager.run_job.return_value = job
+
+        result = self.worker.translate_variants(
+            self.ebook, '/input.epub')
+
+        self.assertIs(job, result)
+        payload = self.worker.working_jobs[job][1]
+        self.assertEqual('bundle_data', payload['requested_storage'])
+        self.assertEqual('linked_pair', payload['effective_storage'])
+        worker_args = self.worker.gui.job_manager.run_job.call_args.kwargs[
+            'args'][2]
+        self.assertEqual(1.0, worker_args[-1])
+        mock_question.assert_called_once()
+        self.assertFalse(mock_question.call_args.kwargs['default_yes'])
+        self.assertEqual(
+            'Keep preset A', mock_question.call_args.kwargs['yes_text'])
+        self.assertEqual(
+            'Use preset B (safe)',
+            mock_question.call_args.kwargs['no_text'])
+        self.assertEqual(
+            'bundle_data',
+            self.worker.config['translation_variant_storage'])
+
+    @patch(module_name + '.temporary_path')
+    @patch(module_name + '.temporary_copy')
+    @patch(module_name + '.question_dialog')
+    def test_translate_variants_changes_a_to_b_for_last_read_position(
+            self, mock_question, mock_copy, mock_temp_path):
+        self.worker.config = {
+            'to_library': True,
+            'translation_variant_storage': 'bundle_data',
+            'vertical_gap': 1.0,
+        }
+        self.worker.working_jobs = {}
+        self.ebook.id = 7
+        self.ebook.title = 'Title'
+        self.ebook.input_format = 'epub'
+        self.ebook.output_format = 'epub'
+        self.ebook.source_lang = 'English'
+        self.ebook.target_lang = 'Chinese'
+        self.ebook.encoding = 'utf-8'
+        self.ebook.target_direction = 'auto'
+        self.worker.api.annotation_count_for_book.return_value = 0
+        self.worker.api.get_last_read_positions.return_value = [{}]
+        mock_question.return_value = False
+        mock_copy.return_value = '/source.epub'
+        mock_temp_path.side_effect = [
+            '/translation.epub', '/bilingual.epub']
+        job = Mock()
+        self.worker.gui.job_manager.run_job.return_value = job
+
+        self.worker.translate_variants(self.ebook, '/input.epub')
+
+        payload = self.worker.working_jobs[job][1]
+        self.assertEqual('linked_pair', payload['effective_storage'])
+        mock_question.assert_called_once()
+
+    @patch(module_name + '.temporary_path')
+    @patch(module_name + '.temporary_copy')
+    @patch(module_name + '.question_dialog', return_value=True)
+    def test_translate_variants_keeps_a_when_user_confirms(
+            self, mock_question, mock_copy, mock_temp_path):
+        self.worker.config = {
+            'to_library': True,
+            'translation_variant_storage': 'bundle_data',
+            'translation_variant_gap': 1.0,
         }
         self.worker.working_jobs = {}
         self.ebook.id = 7
@@ -108,44 +191,8 @@ class TestConversionWorker(unittest.TestCase):
         self.assertIs(job, result)
         payload = self.worker.working_jobs[job][1]
         self.assertEqual('bundle_data', payload['requested_storage'])
-        self.assertEqual('linked_pair', payload['effective_storage'])
-        worker_args = self.worker.gui.job_manager.run_job.call_args.kwargs[
-            'args'][2]
-        self.assertEqual(1.0, worker_args[-1])
-        mock_warning.assert_called_once()
-
-    @patch(module_name + '.temporary_path')
-    @patch(module_name + '.temporary_copy')
-    @patch(module_name + '.warning_dialog')
-    def test_translate_variants_changes_a_to_b_for_last_read_position(
-            self, mock_warning, mock_copy, mock_temp_path):
-        self.worker.config = {
-            'to_library': True,
-            'translation_variant_storage': 'bundle_data',
-            'vertical_gap': 1.0,
-        }
-        self.worker.working_jobs = {}
-        self.ebook.id = 7
-        self.ebook.title = 'Title'
-        self.ebook.input_format = 'epub'
-        self.ebook.output_format = 'epub'
-        self.ebook.source_lang = 'English'
-        self.ebook.target_lang = 'Chinese'
-        self.ebook.encoding = 'utf-8'
-        self.ebook.target_direction = 'auto'
-        self.worker.api.annotation_count_for_book.return_value = 0
-        self.worker.api.get_last_read_positions.return_value = [{}]
-        mock_copy.return_value = '/source.epub'
-        mock_temp_path.side_effect = [
-            '/translation.epub', '/bilingual.epub']
-        job = Mock()
-        self.worker.gui.job_manager.run_job.return_value = job
-
-        self.worker.translate_variants(self.ebook, '/input.epub')
-
-        payload = self.worker.working_jobs[job][1]
-        self.assertEqual('linked_pair', payload['effective_storage'])
-        mock_warning.assert_called_once()
+        self.assertEqual('bundle_data', payload['effective_storage'])
+        mock_question.assert_called_once()
 
     @patch(module_name + '.error_dialog')
     def test_translate_variants_rejects_unsupported_scope(self, mock_error):
