@@ -194,6 +194,48 @@ class TestConversionWorker(unittest.TestCase):
         self.assertEqual('bundle_data', payload['effective_storage'])
         mock_question.assert_called_once()
 
+    @patch(module_name + '.temporary_path')
+    @patch(module_name + '.temporary_copy')
+    @patch(module_name + '.question_dialog')
+    def test_translate_variants_handles_unverified_reading_assets_choice(
+            self, mock_question, mock_copy, mock_temp_path):
+        self.worker.config = {
+            'to_library': True,
+            'translation_variant_storage': 'bundle_data',
+            'translation_variant_gap': 1.0,
+        }
+        self.ebook.id = 7
+        self.ebook.title = 'Title'
+        self.ebook.input_format = 'epub'
+        self.ebook.output_format = 'epub'
+        self.ebook.source_lang = 'English'
+        self.ebook.target_lang = 'Chinese'
+        self.ebook.encoding = 'utf-8'
+        self.ebook.target_direction = 'auto'
+        mock_copy.return_value = '/source.epub'
+
+        for keep_a, expected_storage in (
+                (True, 'bundle_data'), (False, 'linked_pair')):
+            with self.subTest(keep_a=keep_a):
+                self.worker.working_jobs = {}
+                self.worker.api.annotation_count_for_book.side_effect = (
+                    Exception('reading asset status unavailable'))
+                mock_question.return_value = keep_a
+                mock_temp_path.side_effect = [
+                    '/translation.epub', '/bilingual.epub']
+                job = Mock()
+                self.worker.gui.job_manager.run_job.return_value = job
+
+                result = self.worker.translate_variants(
+                    self.ebook, '/input.epub')
+
+                self.assertIs(job, result)
+                payload = self.worker.working_jobs[job][1]
+                self.assertEqual('bundle_data', payload['requested_storage'])
+                self.assertEqual(expected_storage, payload['effective_storage'])
+                mock_question.assert_called_once()
+                mock_question.reset_mock()
+
     @patch(module_name + '.error_dialog')
     def test_translate_variants_rejects_unsupported_scope(self, mock_error):
         self.worker.config = {'to_library': False}
