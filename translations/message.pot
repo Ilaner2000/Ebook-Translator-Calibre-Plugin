@@ -1279,7 +1279,7 @@ msgid "C — Source, Chinese, and bilingual as separate books"
 msgstr ""
 
 #: setting.py
-msgid "The Chinese EPUB replaces the main EPUB. The source and bilingual EPUBs are archived in Data and must be exported to read. The source leaves full-text search. If highlights or reading progress exist, this run automatically uses B."
+msgid "The Chinese EPUB replaces the main EPUB. The source and bilingual EPUBs are archived in Data and must be exported to read. The source leaves full-text search. If highlights or reading progress exist (or their status cannot be verified), you will be asked whether to keep A or use B."
 msgstr ""
 
 #: setting.py

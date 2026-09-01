@@ -964,8 +964,8 @@ msgstr "B — 保留原書；新增中文版；雙語版存於 Data"
 msgid "C — Source, Chinese, and bilingual as separate books"
 msgstr "C — 原文、中文與雙語各自成書"
 
-msgid "The Chinese EPUB replaces the main EPUB. The source and bilingual EPUBs are archived in Data and must be exported to read. The source leaves full-text search. If highlights or reading progress exist, this run automatically uses B."
-msgstr "純中文 EPUB 取代主 EPUB；原文與雙語版封存於 Data，需匯出後閱讀，原文也不再參與全文搜尋。若已有標註或閱讀進度，本次會自動改用 B。"
+msgid "The Chinese EPUB replaces the main EPUB. The source and bilingual EPUBs are archived in Data and must be exported to read. The source leaves full-text search. If highlights or reading progress exist (or their status cannot be verified), you will be asked whether to keep A or use B."
+msgstr "純中文 EPUB 取代主 EPUB；原文與雙語版封存於 Data，需匯出後閱讀，原文也不再參與全文搜尋。若已有畫線或閱讀進度（或無法確認其狀態），程式會詢問要保留 A 或改用 B。"
 
 msgid "The source book remains unchanged. A linked Chinese book is added; its bilingual EPUB is archived in Data."
 msgstr "原書保持不變；新增一筆可追溯來源的中文版，雙語 EPUB 封存於其 Data。"

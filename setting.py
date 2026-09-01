@@ -245,7 +245,8 @@ class TranslationSetting(QDialog):
                 'The Chinese EPUB replaces the main EPUB. The source and '
                 'bilingual EPUBs are archived in Data and must be exported '
                 'to read. The source leaves full-text search. If highlights '
-                'or reading progress exist, this run automatically uses B.'),
+                'or reading progress exist (or their status cannot be '
+                'verified), you will be asked whether to keep A or use B.'),
             'linked_pair': _(
                 'The source book remains unchanged. A linked Chinese book '
                 'is added; its bilingual EPUB is archived in Data.'),
