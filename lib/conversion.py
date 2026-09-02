@@ -4,6 +4,7 @@ import json
 import shutil
 import hashlib
 import traceback
+from contextlib import contextmanager
 from types import MethodType
 from typing import Callable
 from tempfile import gettempdir
@@ -39,6 +40,24 @@ load_translations()  # type: ignore
 
 variant_storage_values = (
     'bundle_data', 'linked_pair', 'three_records')
+
+
+_missing_instance_method = object()
+
+
+@contextmanager
+def temporary_method_binding(instance, name, method):
+    """Temporarily override an instance method without leaking its state."""
+    instance_attributes = vars(instance)
+    previous = instance_attributes.get(name, _missing_instance_method)
+    setattr(instance, name, MethodType(method, instance))
+    try:
+        yield
+    finally:
+        if previous is _missing_instance_method:
+            instance_attributes.pop(name, None)
+        else:
+            instance_attributes[name] = previous
 
 
 def temporary_path(suffix):
@@ -114,8 +133,9 @@ def convert_book(
         self.report_progress(0., _('Outputting ebook file...'))
         _convert(oeb, output_path, input_plugin, opts, log)
 
-    plumber.output_plugin.convert = MethodType(convert, plumber.output_plugin)
-    plumber.run()
+    with temporary_method_binding(
+            plumber.output_plugin, 'convert', convert):
+        plumber.run()
 
 
 def convert_srt(
@@ -210,9 +230,10 @@ def extract_book(input_path, encoding):
         elements.extend(get_toc_elements(oeb.toc.nodes, []))
         elements.extend(get_page_elements(oeb.manifest.items))
         raise ConversionAbort()
-    plumber.output_plugin.convert = MethodType(convert, plumber.output_plugin)
     try:
-        plumber.run()
+        with temporary_method_binding(
+                plumber.output_plugin, 'convert', convert):
+            plumber.run()
     except ConversionAbort:
         return elements
 

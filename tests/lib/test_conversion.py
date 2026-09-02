@@ -4,11 +4,119 @@ from typing import Callable
 from types import SimpleNamespace
 from unittest.mock import patch, Mock, call
 
-from ...lib.conversion import ConversionWorker, convert_variants_item
+from ...lib.conversion import (
+    ConversionWorker, convert_book, convert_variants_item, extract_book)
 from ...lib.ebook import Ebook
 
 
 module_name = 'calibre_plugins.ebook_translator.lib.conversion'
+
+
+class TestConvertBookMethodRestoration(unittest.TestCase):
+    class Reporter:
+        global_min = 0
+
+        def __call__(self, *args, **kwargs):
+            pass
+
+    class OutputPlugin:
+        def __init__(self):
+            self.report_progress = (
+                TestConvertBookMethodRestoration.Reporter())
+            self.base_convert_calls = 0
+
+        def convert(self, *args, **kwargs):
+            self.base_convert_calls += 1
+
+    def run_convert(self, plugin, handler, fail=False):
+        class FakePlumber:
+            def __init__(self, *args, **kwargs):
+                self.output_plugin = plugin
+
+            def run(self):
+                if fail:
+                    raise RuntimeError('plumber failed')
+                oeb = SimpleNamespace(
+                    metadata=Mock(), toc=SimpleNamespace(nodes=[]),
+                    manifest=SimpleNamespace(items=[]))
+                self.output_plugin.convert(
+                    oeb, '/output.epub', None, None, Mock())
+
+        translation = Mock()
+        cache = Mock()
+        cache.all_paragraphs.return_value = []
+        handler.prepare_original.return_value = []
+        with patch(module_name + '.Plumber', FakePlumber), \
+                patch(module_name + '.CompositeProgressReporter',
+                      side_effect=lambda *args: self.Reporter()), \
+                patch(module_name + '.get_metadata_elements',
+                      return_value=[]), \
+                patch(module_name + '.get_toc_elements', return_value=[]), \
+                patch(module_name + '.get_page_elements', return_value=[]):
+            convert_book(
+                '/input.epub', '/output.epub', translation, handler, cache,
+                'debug', 'utf-8', Mock())
+
+    def test_sequential_conversions_do_not_reenter_previous_wrapper(self):
+        plugin = self.OutputPlugin()
+        first_handler = Mock()
+        second_handler = Mock()
+
+        self.run_convert(plugin, first_handler)
+        self.run_convert(plugin, second_handler)
+
+        self.assertEqual(1, first_handler.prepare_original.call_count)
+        self.assertEqual(1, second_handler.prepare_original.call_count)
+        self.assertEqual(2, plugin.base_convert_calls)
+        self.assertNotIn('convert', vars(plugin))
+
+    def test_convert_binding_is_restored_for_all_exit_paths(self):
+        for instance_override in (False, True):
+            for fail in (False, True):
+                with self.subTest(
+                        instance_override=instance_override, fail=fail):
+                    plugin = self.OutputPlugin()
+                    original_override = None
+                    if instance_override:
+                        original_override = Mock()
+                        plugin.convert = original_override
+                    handler = Mock()
+
+                    if fail:
+                        with self.assertRaisesRegex(
+                                RuntimeError, 'plumber failed'):
+                            self.run_convert(plugin, handler, fail=True)
+                    else:
+                        self.run_convert(plugin, handler)
+
+                    if instance_override:
+                        self.assertIs(
+                            original_override, vars(plugin)['convert'])
+                    else:
+                        self.assertNotIn('convert', vars(plugin))
+
+    def test_extract_book_restores_convert_binding(self):
+        plugin = self.OutputPlugin()
+
+        class FakePlumber:
+            def __init__(self, *args, **kwargs):
+                self.output_plugin = plugin
+
+            def run(self):
+                oeb = SimpleNamespace(
+                    metadata=Mock(), toc=SimpleNamespace(nodes=[]),
+                    manifest=SimpleNamespace(items=[]))
+                self.output_plugin.convert(
+                    oeb, '/output.epub', None, None, Mock())
+
+        with patch(module_name + '.Plumber', FakePlumber), \
+                patch(module_name + '.get_metadata_elements',
+                      return_value=[]), \
+                patch(module_name + '.get_toc_elements', return_value=[]), \
+                patch(module_name + '.get_page_elements', return_value=[]):
+            self.assertEqual([], extract_book('/input.epub', 'utf-8'))
+
+        self.assertNotIn('convert', vars(plugin))
 
 
 class TestConvertVariantsItem(unittest.TestCase):
