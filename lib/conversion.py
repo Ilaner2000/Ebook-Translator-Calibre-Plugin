@@ -497,7 +497,7 @@ class ConversionWorker:
         return job
 
     def _prepare_variant_metadata(
-            self, path, ebook, kind, source_uuid):
+            self, path, ebook, kind, source_uuid, role_tags=None):
         with open(path, 'r+b') as file:
             metadata = get_metadata(file, 'epub')
             base_title = ebook.custom_title or metadata.title or ebook.title
@@ -512,7 +512,7 @@ class ConversionWorker:
                 metadata.language = ebook.lang_code
             subjects = ebook_metadata_config.get('subjects') or []
             tags = list(metadata.tags or [])
-            for tag in subjects + [
+            for tag in subjects + list(role_tags or []) + [
                     'Translated by Ebook Translator: '
                     'https://translator.bookfere.com']:
                 if tag not in tags:
@@ -522,6 +522,23 @@ class ConversionWorker:
                 'ebook-translator-source', str(source_uuid))
             set_metadata(file, metadata, 'epub')
         return metadata, title
+
+    @staticmethod
+    def _is_chinese_target(ebook):
+        lang_code = str(ebook.lang_code or '').lower().replace('_', '-')
+        target_lang = str(ebook.target_lang or '').lower()
+        return (lang_code == 'zho' or lang_code.startswith('zh') or
+                'chinese' in target_lang or '中文' in target_lang)
+
+    def _variant_role_tags(self, ebook, storage, kind):
+        if not self._is_chinese_target(ebook):
+            return []
+        if kind == 'bilingual':
+            return ['雙語_']
+        tags = ['中譯_']
+        if storage in ('bundle_data', 'linked_pair'):
+            tags.append('附雙語_')
+        return tags
 
     def _create_variant_book(self, metadata, path):
         book_id = self.db.create_book_entry(metadata)
@@ -614,26 +631,37 @@ class ConversionWorker:
     def _store_variants(self, ebook, payload):
         source_id = ebook.id
         source_uuid = self.api.field_for('uuid', source_id) or source_id
+        storage = payload['effective_storage']
+        translation_role_tags = self._variant_role_tags(
+            ebook, storage, 'translation')
+        bilingual_role_tags = self._variant_role_tags(
+            ebook, storage, 'bilingual')
         translation_metadata, translation_title = \
             self._prepare_variant_metadata(
                 payload['translation_path'], ebook, 'translation',
-                source_uuid)
+                source_uuid, translation_role_tags)
         bilingual_metadata, _bilingual_title = self._prepare_variant_metadata(
-            payload['bilingual_path'], ebook, 'bilingual', source_uuid)
+            payload['bilingual_path'], ebook, 'bilingual', source_uuid,
+            bilingual_role_tags)
         namespace = '%s/translation-variants/%s' % (
             DATA_DIR_NAME, payload['run_id'])
         source_relpath = '%s/source.epub' % namespace
         bilingual_relpath = '%s/bilingual.%s.epub' % (
             namespace, ebook.lang_code or 'target')
         manifest_relpath = '%s/manifest.json' % namespace
-        storage = payload['effective_storage']
 
         if storage == 'bundle_data':
             original_identifiers = dict(
                 self.api.field_for('identifiers', source_id) or {})
+            original_tags = list(
+                self.api.field_for('tags', source_id) or [])
             marked_identifiers = dict(original_identifiers)
             marked_identifiers['ebook-translator-variant'] = \
                 'translation:%s' % payload['run_id']
+            marked_tags = list(original_tags)
+            for tag in translation_role_tags:
+                if tag not in marked_tags:
+                    marked_tags.append(tag)
             derivative_ids = {
                 'translation': source_id,
                 'bilingual': None,
@@ -647,6 +675,11 @@ class ConversionWorker:
             }
             try:
                 self._add_verified_extra_files(source_id, files)
+            except Exception:
+                self._remove_extra_files(source_id, files.keys())
+                raise
+            try:
+                self.api.set_field('tags', {source_id: marked_tags})
             except Exception:
                 self._remove_extra_files(source_id, files.keys())
                 raise
@@ -676,6 +709,7 @@ class ConversionWorker:
                             'Calibre rejected the source EPUB restoration')
                     self.api.set_field(
                         'identifiers', {source_id: original_identifiers})
+                    self.api.set_field('tags', {source_id: original_tags})
                 except Exception as restore_error:
                     # Keep the verified source Data file for manual recovery.
                     raise RuntimeError(

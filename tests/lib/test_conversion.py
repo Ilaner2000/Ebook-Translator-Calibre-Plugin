@@ -382,6 +382,7 @@ class TestConversionWorker(unittest.TestCase):
         self.worker.api.field_for.side_effect = lambda field, book_id: {
             'uuid': 'source-uuid',
             'identifiers': {'isbn': '123'},
+            'tags': ['Topic', 'AY_雙語'],
         }.get(field)
         self.worker.api.add_format.return_value = True
         self.worker.api.format_abspath.return_value = '/library/translation.epub'
@@ -433,11 +434,20 @@ class TestConversionWorker(unittest.TestCase):
             'data/translation-variants/run-1/bilingual.zh-Hant.epub'])
         self.worker.api.add_format.assert_called_once_with(
             7, 'EPUB', '/translation.epub', replace=True, run_hooks=False)
-        self.worker.api.set_field.assert_called_once_with(
-            'identifiers', {7: {
+        self.assertEqual([
+            call('tags', {7: [
+                'Topic', 'AY_雙語', '中譯_', '附雙語_']}),
+            call('identifiers', {7: {
                 'isbn': '123',
                 'ebook-translator-variant': 'translation:run-1',
-            }})
+            }}),
+        ], self.worker.api.set_field.call_args_list)
+        self.assertEqual([
+            call('/translation.epub', self.ebook, 'translation',
+                 'source-uuid', ['中譯_', '附雙語_']),
+            call('/bilingual.epub', self.ebook, 'bilingual',
+                 'source-uuid', ['雙語_']),
+        ], mock_metadata.call_args_list)
         self.worker.db.create_book_entry.assert_not_called()
         self.assertEqual(
             ('/library/translation.epub', 'Chinese title', 0), result)
@@ -466,8 +476,12 @@ class TestConversionWorker(unittest.TestCase):
             call(7, 'EPUB', '/source.epub',
                  replace=True, run_hooks=False),
         ], self.worker.api.add_format.call_args_list)
-        self.worker.api.set_field.assert_called_once_with(
-            'identifiers', {7: {'isbn': '123'}})
+        self.assertEqual([
+            call('tags', {7: [
+                'Topic', 'AY_雙語', '中譯_', '附雙語_']}),
+            call('identifiers', {7: {'isbn': '123'}}),
+            call('tags', {7: ['Topic', 'AY_雙語']}),
+        ], self.worker.api.set_field.call_args_list)
         self.worker.api.remove_extra_files.assert_called_once()
 
     @patch.object(ConversionWorker, '_variant_manifest')
@@ -498,6 +512,12 @@ class TestConversionWorker(unittest.TestCase):
             'data/translation-variants/run-1/bilingual.zh-Hant.epub', files)
         self.worker.api.add_format.assert_called_once_with(
             21, 'EPUB', '/translation.epub', run_hooks=False)
+        self.assertEqual([
+            call('/translation.epub', self.ebook, 'translation',
+                 'source-uuid', ['中譯_', '附雙語_']),
+            call('/bilingual.epub', self.ebook, 'bilingual',
+                 'source-uuid', ['雙語_']),
+        ], mock_metadata.call_args_list)
         self.worker.gui.library_view.model().books_added \
             .assert_called_once_with(1)
         self.assertEqual(
@@ -528,6 +548,12 @@ class TestConversionWorker(unittest.TestCase):
             call(21, 'EPUB', '/translation.epub', run_hooks=False),
             call(22, 'EPUB', '/bilingual.epub', run_hooks=False),
         ], self.worker.api.add_format.call_args_list)
+        self.assertEqual([
+            call('/translation.epub', self.ebook, 'translation',
+                 'source-uuid', ['中譯_']),
+            call('/bilingual.epub', self.ebook, 'bilingual',
+                 'source-uuid', ['雙語_']),
+        ], mock_metadata.call_args_list)
         self.worker.gui.library_view.model().books_added \
             .assert_called_once_with(2)
         self.assertEqual(
@@ -556,6 +582,12 @@ class TestConversionWorker(unittest.TestCase):
             call(7, 'EPUB', '/source.epub',
                  replace=True, run_hooks=False),
         ], self.worker.api.add_format.call_args_list)
+        self.assertEqual([
+            call('tags', {7: [
+                'Topic', 'AY_雙語', '中譯_', '附雙語_']}),
+            call('identifiers', {7: {'isbn': '123'}}),
+            call('tags', {7: ['Topic', 'AY_雙語']}),
+        ], self.worker.api.set_field.call_args_list)
         self.worker.api.remove_extra_files.assert_called_once()
 
     @patch.object(ConversionWorker, '_variant_manifest')
@@ -598,6 +630,74 @@ class TestConversionWorker(unittest.TestCase):
 
         self.worker.api.add_format.assert_not_called()
         self.worker.api.remove_extra_files.assert_called_once()
+
+    @patch.object(ConversionWorker, '_variant_manifest')
+    @patch.object(ConversionWorker, '_write_manifest')
+    @patch.object(ConversionWorker, '_add_verified_extra_files')
+    @patch.object(ConversionWorker, '_prepare_variant_metadata')
+    def test_store_variants_a_never_replaces_when_tag_write_fails(
+            self, mock_metadata, mock_add_extra, mock_manifest_file,
+            mock_manifest):
+        self.configure_variant_ebook()
+        mock_metadata.side_effect = [
+            (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
+        mock_manifest_file.return_value = '/manifest.json'
+        self.worker.api.set_field.side_effect = RuntimeError('tag write failed')
+
+        with self.assertRaisesRegex(RuntimeError, 'tag write failed'):
+            self.worker._store_variants(
+                self.ebook, self.variant_payload('bundle_data'))
+
+        self.worker.api.add_format.assert_not_called()
+        self.worker.api.remove_extra_files.assert_called_once()
+
+    def test_variant_role_tags_are_storage_and_language_specific(self):
+        self.configure_variant_ebook()
+        expected = {
+            ('bundle_data', 'translation'): ['中譯_', '附雙語_'],
+            ('bundle_data', 'bilingual'): ['雙語_'],
+            ('linked_pair', 'translation'): ['中譯_', '附雙語_'],
+            ('linked_pair', 'bilingual'): ['雙語_'],
+            ('three_records', 'translation'): ['中譯_'],
+            ('three_records', 'bilingual'): ['雙語_'],
+        }
+        for key, tags in expected.items():
+            with self.subTest(key=key):
+                self.assertEqual(
+                    tags, self.worker._variant_role_tags(
+                        self.ebook, key[0], key[1]))
+
+        self.ebook.lang_code = 'de'
+        self.ebook.target_lang = 'German'
+        self.assertEqual([], self.worker._variant_role_tags(
+            self.ebook, 'bundle_data', 'translation'))
+        self.assertEqual([], self.worker._variant_role_tags(
+            self.ebook, 'bundle_data', 'bilingual'))
+
+    @patch(module_name + '.set_metadata')
+    @patch(module_name + '.get_metadata')
+    @patch(module_name + '.open')
+    def test_prepare_variant_metadata_appends_role_tags_without_removal(
+            self, mock_open, mock_get_metadata, mock_set_metadata):
+        self.configure_variant_ebook()
+        self.ebook.custom_title = ''
+        self.ebook.title = 'Original title'
+        file = Mock()
+        mock_open.return_value.__enter__.return_value = file
+        metadata = Mock()
+        metadata.title = 'Original title'
+        metadata.tags = ['Topic', 'AY_雙語', '中譯_']
+        mock_get_metadata.return_value = metadata
+
+        self.worker._prepare_variant_metadata(
+            '/translation.epub', self.ebook, 'translation', 'source-uuid',
+            ['中譯_', '附雙語_'])
+
+        self.assertEqual([
+            'Topic', 'AY_雙語', '中譯_', '附雙語_',
+            'Translated by Ebook Translator: https://translator.bookfere.com'
+        ], metadata.tags)
+        mock_set_metadata.assert_called_once_with(file, metadata, 'epub')
 
     @patch.object(ConversionWorker, '_variant_manifest')
     @patch.object(ConversionWorker, '_write_manifest')
