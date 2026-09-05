@@ -15,6 +15,7 @@ from calibre import sanitize_file_name  # type: ignore
 from calibre.gui2 import (  # type: ignore
     Dispatcher, error_dialog, question_dialog)
 from calibre.constants import DEBUG, __version__  # type: ignore
+from calibre.db.constants import DATA_DIR_NAME  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 from calibre.utils.logging import Stream  # type: ignore
 from calibre.ebooks.conversion.plumber import (  # type: ignore
@@ -584,6 +585,7 @@ class ConversionWorker:
         plugin_version = str(EbookTranslator.__version__)
         return {
             'schema_version': 1,
+            'storage_layout': 'calibre-data-v1',
             'run_id': payload['run_id'],
             'created_at': datetime.now(timezone.utc).isoformat(),
             'source_book_id': ebook.id,
@@ -618,7 +620,8 @@ class ConversionWorker:
                 source_uuid)
         bilingual_metadata, _bilingual_title = self._prepare_variant_metadata(
             payload['bilingual_path'], ebook, 'bilingual', source_uuid)
-        namespace = 'translation-variants/%s' % payload['run_id']
+        namespace = '%s/translation-variants/%s' % (
+            DATA_DIR_NAME, payload['run_id'])
         source_relpath = '%s/source.epub' % namespace
         bilingual_relpath = '%s/bilingual.%s.epub' % (
             namespace, ebook.lang_code or 'target')

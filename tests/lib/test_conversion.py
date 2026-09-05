@@ -398,6 +398,7 @@ class TestConversionWorker(unittest.TestCase):
             'source-uuid', {'translation': 21, 'bilingual': None})
 
         self.assertEqual('Default Engine', manifest['translation_engine'])
+        self.assertEqual('calibre-data-v1', manifest['storage_layout'])
         mock_get_translator.assert_called_once_with()
 
     @patch(module_name + '.file_sha256', return_value='hash')
@@ -420,10 +421,16 @@ class TestConversionWorker(unittest.TestCase):
             self.ebook, self.variant_payload('bundle_data'))
 
         files = mock_add_extra.call_args.args[1]
+        self.assertEqual(7, mock_add_extra.call_args.args[0])
+        self.assertEqual({
+            'data/translation-variants/run-1/source.epub',
+            'data/translation-variants/run-1/bilingual.zh-Hant.epub',
+            'data/translation-variants/run-1/manifest.json',
+        }, set(files))
         self.assertEqual('/source.epub', files[
-            'translation-variants/run-1/source.epub'])
+            'data/translation-variants/run-1/source.epub'])
         self.assertEqual('/bilingual.epub', files[
-            'translation-variants/run-1/bilingual.zh-Hant.epub'])
+            'data/translation-variants/run-1/bilingual.zh-Hant.epub'])
         self.worker.api.add_format.assert_called_once_with(
             7, 'EPUB', '/translation.epub', replace=True, run_hooks=False)
         self.worker.api.set_field.assert_called_once_with(
@@ -480,10 +487,15 @@ class TestConversionWorker(unittest.TestCase):
             self.ebook, self.variant_payload('linked_pair'))
 
         files = mock_add_extra.call_args.args[1]
+        self.assertEqual(21, mock_add_extra.call_args.args[0])
+        self.assertEqual({
+            'data/translation-variants/run-1/bilingual.zh-Hant.epub',
+            'data/translation-variants/run-1/manifest.json',
+        }, set(files))
         self.assertNotIn(
-            'translation-variants/run-1/source.epub', files)
+            'data/translation-variants/run-1/source.epub', files)
         self.assertIn(
-            'translation-variants/run-1/bilingual.zh-Hant.epub', files)
+            'data/translation-variants/run-1/bilingual.zh-Hant.epub', files)
         self.worker.api.add_format.assert_called_once_with(
             21, 'EPUB', '/translation.epub', run_hooks=False)
         self.worker.gui.library_view.model().books_added \
@@ -508,8 +520,9 @@ class TestConversionWorker(unittest.TestCase):
             self.ebook, self.variant_payload('three_records'))
 
         files = mock_add_extra.call_args.args[1]
+        self.assertEqual(21, mock_add_extra.call_args.args[0])
         self.assertEqual({
-            'translation-variants/run-1/manifest.json': '/manifest.json'
+            'data/translation-variants/run-1/manifest.json': '/manifest.json'
         }, files)
         self.assertEqual([
             call(21, 'EPUB', '/translation.epub', run_hooks=False),
@@ -641,13 +654,13 @@ class TestConversionWorker(unittest.TestCase):
     @patch(module_name + '.file_sha256')
     def test_add_verified_extra_files_rejects_hash_mismatch(self, mock_hash):
         self.worker.api.list_extra_files.return_value = [SimpleNamespace(
-            relpath='translation-variants/run/source.epub',
+            relpath='data/translation-variants/run/source.epub',
             file_path='/stored/source.epub')]
         mock_hash.side_effect = ['source-hash', 'different-hash']
 
         with self.assertRaisesRegex(RuntimeError, 'hash mismatch'):
             self.worker._add_verified_extra_files(7, {
-                'translation-variants/run/source.epub': '/source.epub'})
+                'data/translation-variants/run/source.epub': '/source.epub'})
 
     def test_translate_done_job_failed_debug(self):
         self.job.failed = True
