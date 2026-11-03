@@ -39,6 +39,14 @@ class TestOnlyMode(unittest.TestCase):
             p=self.root('<p class="%s" style="margin-top:2em">text</p>'%cls);before=etree.tostring(p);apply_typography(p,OnlyPolicy());self.assertEqual(before,etree.tostring(p))
         p=self.root('<p class="COTX" style="margin-top:2em">first</p>');apply_typography(p,OnlyPolicy());self.assertIn('margin-top:2em',p.get('style'));self.assertNotIn('margin-top:0.75em',p.get('style'))
 
+    def test_only_a2_heading_navigation_inherits_heading_style(self):
+        heading=self.root('<p class="CT" style="color:black"><a href="toc.xhtml#toc8" id="toc_8" style="font-weight:600">章名</a><sup><a href="notes.xhtml#n1">1</a></sup><a href="https://example.org/toc.xhtml">external</a></p>')
+        before=etree.tostring(heading);apply_typography(heading,OnlyPolicy());self.assertEqual(before,etree.tostring(heading))
+        apply_typography(heading,OnlyPolicy(preserve_inline=True))
+        a=heading[0];self.assertEqual('toc.xhtml#toc8',a.get('href'));self.assertEqual('toc_8',a.get('id'));self.assertIn('color:inherit',a.get('style'));self.assertIn('text-decoration:none',a.get('style'));self.assertIn('font-weight:600',a.get('style'))
+        self.assertIsNone(heading[1][0].get('style'));self.assertIsNone(heading[2].get('style'))
+        body=self.root('<p class="TX"><a href="toc.xhtml#toc8">body link</a></p>');apply_typography(body,OnlyPolicy(preserve_inline=True));self.assertIsNone(body[0].get('style'))
+
     def test_policy_validates_parameters(self):
         for kw in ({'line_height':float('nan')},{'line_height':True},{'line_height':3},{'paragraph_gap':-1},{'text_align':'right'},{'body_classes':['bad class']}):
             with self.subTest(kw=kw),self.assertRaises(ValueError):OnlyPolicy(**kw)

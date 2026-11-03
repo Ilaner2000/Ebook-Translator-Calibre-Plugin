@@ -11,6 +11,7 @@ import html
 import math
 import re
 import unicodedata
+from urllib.parse import urlsplit
 from lxml import etree
 
 
@@ -26,6 +27,7 @@ class OnlyPolicy:
     body_classes: tuple = ('TX', 'TX1', 'TXb')
     intro_classes: tuple = ('COTX',)
     quote_classes: tuple = ('V', 'V_f', 'V_l')
+    heading_link_classes: tuple = ('CN', 'CT')
     preserve_inline: bool = False
     dropcap_classes: tuple = ('_idGenDropcap-1', '_idgendropcap')
     smallcaps_classes: tuple = ('first-line',)
@@ -41,7 +43,7 @@ class OnlyPolicy:
             raise ValueError('unsupported only text alignment')
         object.__setattr__(self, 'line_height', float(self.line_height))
         object.__setattr__(self, 'paragraph_gap', float(self.paragraph_gap))
-        for field in ('body_classes', 'intro_classes', 'quote_classes', 'dropcap_classes', 'smallcaps_classes'):
+        for field in ('body_classes', 'intro_classes', 'quote_classes', 'heading_link_classes', 'dropcap_classes', 'smallcaps_classes'):
             values = getattr(self, field)
             if not isinstance(values, (tuple, list)) or any(not isinstance(x, str) or not x or re.search(r'\s', x) for x in values):
                 raise ValueError('class roles must be explicit nonempty CSS tokens')
@@ -68,6 +70,18 @@ def apply_typography(node, policy):
     if policy is None:
         return
     classes = _classes(node)
+    if policy.preserve_inline and classes & {x.casefold() for x in policy.heading_link_classes}:
+        # Chapter-number/title anchors are navigation, not body references.
+        # Keep their destination/ID but inherit the publisher heading color.
+        # Footnotes and other links retain their original styling.
+        for link in node.iterdescendants():
+            if not isinstance(link.tag, str) or _local(link) != 'a':
+                continue
+            target = urlsplit(link.get('href', ''))
+            if target.scheme or target.netloc or target.path.rsplit('/', 1)[-1].casefold() not in ('toc.xhtml', 'nav.xhtml'):
+                continue
+            style = link.get('style', '').strip().rstrip(';')
+            link.set('style', ';'.join(x for x in (style, 'color:inherit', 'text-decoration:none') if x))
     body = bool(classes & {x.casefold() for x in policy.body_classes})
     intro = bool(classes & {x.casefold() for x in policy.intro_classes})
     quote = bool(classes & {x.casefold() for x in policy.quote_classes})

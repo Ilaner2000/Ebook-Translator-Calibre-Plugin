@@ -8,6 +8,11 @@ introduction and verse roles receive line height and alignment. Only body
 paragraphs receive the ordinary gap. Publisher indentation, fonts, heading,
 caption and footnote styles, and introduction/verse spacing remain intact.
 Role mappings are book-specific inputs, not a general Chinese typography UI.
+For A2, local `toc.xhtml`/`nav.xhtml` links in the chapter-number/title roles
+inherit the heading color and have no underline. Their hrefs/IDs remain intact;
+body, footnote and external links retain their styling. Controlled source and
+bilingual English headings also show the browser's blue/underline defaults;
+this scoped treatment follows AY's requested CURRENT-like title appearance.
 
 Set `preserve_inline: true` for A2. Extraction returns paired
 `⟦ET0O⟧...⟦ET0C⟧` markers for source inline elements; existing reserve placeholders
@@ -54,5 +59,6 @@ are in the external S740 evidence packet. CURRENT/V1 retain the original seven
 broken visible note targets; V2 restores them. The additional hidden supplemental
 rearnote receives structural checks, not a claimed user-visible click test.
 Controlled local Chrome previews are not Content Server or physical-phone
-acceptance. Typography parameters await AY's choice and explicit THOROUGH
-acceptance. This branch is not a plugin installation or seven-book regeneration.
+acceptance. AY selected V2 with 1.7 line height and 0.75em paragraph gap
+(T187:m1389); final cross-family review and explicit THOROUGH acceptance remain.
+This branch is not a plugin installation or seven-book regeneration.
