@@ -27,6 +27,8 @@ defaults: dict[str, Any] = {
     'show_notification': True,
     'translation_position': None,
     'vertical_gap': 0.0,
+    # Opt-in only-mode policy; None keeps existing rendering byte-compatible.
+    'only_typography': None,
     'translation_variants_enabled': False,
     'translation_variant_storage': 'bundle_data',
     'translation_variant_gap': 1.0,

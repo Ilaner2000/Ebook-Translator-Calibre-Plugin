@@ -11,6 +11,7 @@ from .utils import (
     log, ns, uid, trim, sorted_mixed_keys, open_file, css_to_xpath,
     create_xpath)
 from .config import get_config
+from .only_mode import OnlyPolicy, InlinePlan, InlineAlignmentError, apply_typography
 
 
 inline_elements = (
@@ -40,6 +41,8 @@ class Element:
         self.original = []
         self.column_gap = None
         self.vertical_gap = 0.0
+        self.only_policy = None
+        self.inline_plan = None
 
         self.position = None
         self.target_direction = None
@@ -71,6 +74,10 @@ class Element:
 
     def set_position(self, position):
         self.position = position
+
+    def set_only_policy(self, value):
+        policy = value if isinstance(value, OnlyPolicy) else OnlyPolicy.from_config(value)
+        self.only_policy = policy
 
     def set_target_direction(self, direction):
         self.target_direction = direction
@@ -249,6 +256,9 @@ class PageElement(Element):
                     elements[eid] = element = parent
             self.reserve_elements.append(get_string(element, True))
             self._safe_remove(element, replacement)
+        if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline:
+            self.inline_plan = InlinePlan(element_copy, self.only_policy)
+            return trim(self.inline_plan.marked_source)
         return trim(''.join(element_copy.itertext()))
 
     def _polish_translation(self, translation):
@@ -302,6 +312,8 @@ class PageElement(Element):
                 style = ';'.join(filter(None, (style, *declarations)))
         if style is not None:
             new_element.set('style', style)
+        if self.position == 'only':
+            apply_typography(new_element, self.only_policy)
         return new_element
 
     def add_translation(self, translation=None):
@@ -336,6 +348,10 @@ class PageElement(Element):
             translation = re.sub(
                 xml_escape(pattern), lambda _: element, translation)
         translation = self._polish_translation(translation)
+        if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline:
+            if self.inline_plan is None:
+                raise InlineAlignmentError('A2 requires prepared marker content before rendering')
+            translation = self.inline_plan.restore_xml(translation)
 
         group_elements = ('li', 'th', 'td', 'caption')
         element_name = get_name(self.element)
@@ -724,6 +740,12 @@ class ElementHandler:
         except (TypeError, ValueError):
             self.vertical_gap = 0.0
 
+    def set_only_policy(self, value):
+        policy = value if isinstance(value, OnlyPolicy) else OnlyPolicy.from_config(value)
+        if policy and policy.preserve_inline and isinstance(self, ElementHandlerMerge):
+            raise InlineAlignmentError('A2 requires per-element translation; merged markers are not supported')
+        self.only_policy = policy
+
     def load_remove_rules(self, rules=[]):
         default_rules = ('rt', 'rp')
         self.remove_pattern = create_xpath(default_rules + tuple(rules))
@@ -746,6 +768,7 @@ class ElementHandler:
             element.set_original_color(self.original_color)
             element.set_translation_color(self.translation_color)
             element.set_vertical_gap(self.vertical_gap)
+            element.set_only_policy(getattr(self, 'only_policy', None))
             if self.column_gap is not None:
                 element.set_column_gap(self.column_gap)
             element.set_remove_pattern(self.remove_pattern)
@@ -803,6 +826,7 @@ class ElementHandlerMerge(ElementHandler):
             element.set_original_color(self.original_color)
             element.set_translation_color(self.translation_color)
             element.set_vertical_gap(self.vertical_gap)
+            element.set_only_policy(getattr(self, 'only_policy', None))
             if self.column_gap is not None:
                 element.set_column_gap(self.column_gap)
             element.set_remove_pattern(self.remove_pattern)
@@ -946,6 +970,7 @@ def get_element_handler(placeholder, separator, direction):
     handler.set_original_color(config.get('original_color'))
     handler.set_translation_color(config.get('translation_color'))
     handler.set_vertical_gap(config.get('vertical_gap', 0.0))
+    handler.set_only_policy(config.get('only_typography') if position == 'only' else None)
     handler.load_remove_rules(
         config.get('ignore_rules', config.get('element_rules', [])))
     handler.load_reserve_rules(config.get('reserve_rules', []))
