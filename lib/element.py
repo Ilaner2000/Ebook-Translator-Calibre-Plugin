@@ -316,8 +316,7 @@ class PageElement(Element):
             apply_typography(new_element, self.only_policy)
         return new_element
 
-    def add_translation(self, translation=None):
-        # self.element.tail = None  # Make sure the element has no tail
+    def _apply_original_color(self):
         if self.original_color is not None:
             for element in self.element.iter():
                 if element.text is not None or len(list(element)) > 0:
@@ -333,7 +332,9 @@ class PageElement(Element):
                         log.warn(
                             'Failed to set style on element:',
                             get_string(element))
+    def add_translation(self, translation=None):
         if translation is None:
+            self._apply_original_color()
             if self.position in ('left', 'right'):
                 self.element.addnext(self._create_table())
                 self._safe_remove(self.element)
@@ -341,6 +342,17 @@ class PageElement(Element):
 
         # Escape the markups (<m id=1 />) to replace escaped markups.
         translation = xml_escape(translation)
+        if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline:
+            # A valid semantic pair alone is insufficient when its footnote,
+            # image, or other reserved content has been lost or duplicated.
+            for rid in range(len(self.reserve_elements)):
+                pattern = self.placeholder[1].format(r'\s*'.join(format(rid, '05')))
+                if len(list(re.finditer(xml_escape(pattern), translation))) != 1:
+                    raise InlineAlignmentError('missing or duplicate reserve placeholder')
+            if self.reserve_elements:
+                any_reserve = xml_escape(self.placeholder[1].format(r'\d+'))
+                if len(list(re.finditer(any_reserve, translation))) != len(self.reserve_elements):
+                    raise InlineAlignmentError('unknown reserve placeholder')
         for rid, element in enumerate(self.reserve_elements):
             pattern = self.placeholder[1].format(
                 r'\s*'.join(format(rid, '05')))
@@ -352,6 +364,10 @@ class PageElement(Element):
             if self.inline_plan is None:
                 raise InlineAlignmentError('A2 requires prepared marker content before rendering')
             translation = self.inline_plan.restore_xml(translation)
+
+        # Validate A2 pairs/reserves before touching the source, including
+        # optional original-color changes.
+        self._apply_original_color()
 
         group_elements = ('li', 'th', 'td', 'caption')
         element_name = get_name(self.element)

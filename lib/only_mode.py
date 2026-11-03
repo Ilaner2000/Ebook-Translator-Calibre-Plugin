@@ -27,7 +27,7 @@ class OnlyPolicy:
     intro_classes: tuple = ('COTX',)
     quote_classes: tuple = ('V', 'V_f', 'V_l')
     preserve_inline: bool = False
-    dropcap_classes: tuple = ('_idGenDropcap-1',)
+    dropcap_classes: tuple = ('_idGenDropcap-1', '_idgendropcap')
     smallcaps_classes: tuple = ('first-line',)
 
     def __post_init__(self):
@@ -96,13 +96,42 @@ class InlinePlan:
         self.parents = {}
         self.opening = {}
         self.leading_anchors = []
+        self.zero_width = set()
         root = copy.deepcopy(source)
         if any(MARKER_ATTR in x.attrib for x in root.iter() if isinstance(x.tag, str)):
             raise InlineAlignmentError('reserved renderer attribute occurs in source')
         if TOKEN.search(''.join(root.itertext())):
             raise InlineAlignmentError('reserved marker occurs in source text')
+        self._join_split_words(root)
         self._join_opening_run(root, policy)
         self.marked_source = self._content(root, None)
+
+    @staticmethod
+    def _join_split_words(root):
+        # Publishers sometimes split a word around a zero-width page anchor:
+        # <span class=ital>Drosoph</span><a id=page/><span class=ital>ila</span>.
+        # Give the translator one lexical run; keep the anchor at that word's
+        # boundary. Never allocate Chinese characters by English offsets.
+        for parent in list(root.iter()):
+            children = list(parent)
+            for first, anchor, last in zip(children, children[1:], children[2:]):
+                if (first.getparent() is not parent or anchor.getparent() is not parent
+                        or last.getparent() is not parent
+                        or not all(isinstance(x.tag, str) for x in (first, anchor, last))
+                        or _local(first) != 'span' or first.tag != last.tag
+                        or dict(first.attrib) != dict(last.attrib)
+                        or _local(anchor) != 'a' or not anchor.get('id')
+                        or anchor.get('href') or len(anchor) or anchor.text
+                        or len(first) or len(last) or first.tail or anchor.tail
+                        or not (first.text or '').isalpha()
+                        or not (last.text or '').isalpha()):
+                    continue
+                first.text += last.text
+                first.tail = last.tail
+                index = parent.index(first)
+                parent.remove(anchor)
+                parent.insert(index, anchor)
+                parent.remove(last)
 
     def _join_opening_run(self, root, policy):
         children = list(root)
@@ -137,23 +166,24 @@ class InlinePlan:
                 # fork's normal extraction. Unknown remaining markup is not
                 # silently discarded by A2.
                 raise InlineAlignmentError('unreserved inline element: ' + name)
-            if name == 'a' and not ''.join(child.itertext()).strip() and not len(child):
-                if (node.text or '').strip() or parent is not None:
-                    raise InlineAlignmentError('non-leading empty anchor needs explicit alignment')
+            empty_anchor = name == 'a' and not ''.join(child.itertext()).strip() and not len(child)
+            href = child.get('href', '').strip()
+            if re.match(r'(?i)\s*(?:javascript|data|vbscript):', href):
+                raise InlineAlignmentError('unsafe source hyperlink scheme')
+            if empty_anchor and parent is None and not text.strip():
                 anchor = copy.deepcopy(child)
                 anchor.tail = None
                 self.leading_anchors.append(anchor)
                 text += child.tail or ''
                 continue
-            href = child.get('href', '').strip()
-            if re.match(r'(?i)\s*(?:javascript|data|vbscript):', href):
-                raise InlineAlignmentError('unsafe source hyperlink scheme')
             key = str(len(self.templates))
             template = copy.deepcopy(child)
             template.clear(keep_tail=False)
             template.attrib.update(child.attrib)
             self.templates[key] = template
             self.parents[key] = parent
+            if empty_anchor:
+                self.zero_width.add(key)
             if child is getattr(self, '_opening_node', None):
                 self.opening[key] = self._opening_template
             text += '⟦ET%sO⟧%s⟦ET%sC⟧' % (key, self._content(child, key), key)
@@ -196,6 +226,8 @@ class InlinePlan:
             raise InlineAlignmentError('invalid translated fragment') from err
         for node in root.iter():
             key = node.attrib.pop(MARKER_ATTR, None)
+            if key in self.zero_width and (node.text or len(node)):
+                raise InlineAlignmentError('zero-width source anchor gained translated content')
             if key in self.opening:
                 text = node.text or ''
                 i = next((i for i, c in enumerate(text) if c.isalnum()), None)

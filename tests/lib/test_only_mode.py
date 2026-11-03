@@ -9,6 +9,28 @@ from ...lib.config import Configuration
 class TestOnlyMode(unittest.TestCase):
     def root(self,markup):return etree.fromstring(markup.encode())
 
+    def test_split_word_around_page_anchor_is_one_semantic_run(self):
+        src=self.root('<p>Use <span class="ital">Drosoph</span><a id="page45"/><span class="ital">ila</span> here.</p>')
+        plan=InlinePlan(src,OnlyPolicy(preserve_inline=True))
+        self.assertIn('Drosophila',plan.marked_source)
+        self.assertEqual(2,len(plan.templates))
+        out=self.root('<p>'+plan.restore_xml('用⟦ET0O⟧⟦ET0C⟧⟦ET1O⟧果蠅⟦ET1C⟧。')+'</p>')
+        self.assertEqual('page45',out.find('a').get('id'))
+        self.assertEqual('果蠅',out.find('span').text)
+        self.assertEqual('Drosoph',src.find('span').text)
+
+    def test_a2_requires_each_existing_reserve_placeholder_once(self):
+        from ...engines.base import Base
+        for bad in ('⟦ET0O⟧⟦ET0C⟧',
+                    '⟦ET0O⟧{{id_00000}}{{id_00000}}⟦ET0C⟧',
+                    '⟦ET0O⟧{{id_00000}}⟦ET0C⟧{{id_99999}}'):
+            holder=self.root('<div><p><span class="superscript"><sup><a href="notes.xhtml#n1">1</a></sup></span></p></div>')
+            element=PageElement(holder[0]);element.set_position('only');element.set_only_policy(OnlyPolicy(preserve_inline=True));element.set_placeholder(Base.placeholder)
+            handler=ElementHandler(Base.placeholder,Base.separator,'only');handler.load_reserve_rules();element.set_reserve_pattern(handler.reserve_pattern)
+            element.get_content();element.set_original_color('red');before=etree.tostring(holder)
+            with self.subTest(bad=bad),self.assertRaises(InlineAlignmentError):element.add_translation(bad)
+            self.assertEqual(before,etree.tostring(holder))
+
     def test_typography_is_opt_in_and_preserves_roles(self):
         p=self.root('<p class="TX" style="text-indent:20pt;color:red">text</p>')
         before=etree.tostring(p);apply_typography(p,None);self.assertEqual(before,etree.tostring(p))
@@ -47,8 +69,13 @@ class TestOnlyMode(unittest.TestCase):
     def test_escaped_translation_cannot_add_active_html(self):
         p=InlinePlan(self.root('<p><em>word</em></p>'),OnlyPolicy(preserve_inline=True));out=self.root('<p>'+p.restore_xml('⟦ET0O⟧&lt;script&gt;bad&lt;/script&gt;⟦ET0C⟧')+'</p>');self.assertIsNone(out.find('.//script'));self.assertIn('<script>',out.find('em').text)
 
+    def test_nonleading_page_anchor_is_explicit_zero_width_marker(self):
+        p=InlinePlan(self.root('<p><em>first</em><a id="page2"/> second</p>'),OnlyPolicy(preserve_inline=True))
+        out=self.root('<p>'+p.restore_xml('⟦ET0O⟧首段⟦ET0C⟧⟦ET1O⟧⟦ET1C⟧次段')+'</p>');self.assertEqual(['em','a'],[x.tag for x in out]);self.assertEqual('page2',out[1].get('id'));self.assertEqual('次段',out[1].tail)
+        with self.assertRaises(InlineAlignmentError):p.restore_xml('⟦ET0O⟧首段⟦ET0C⟧⟦ET1O⟧不應填入⟦ET1C⟧次段')
+
     def test_source_marker_and_unsafe_link_rejected(self):
-        for markup in ('<p>⟦ET0O⟧</p>','<p><a href="javascript:alert(1)">x</a></p>','<p><foo>x</foo></p>'):
+        for markup in ('<p>⟦ET0O⟧</p>','<p><a href="javascript:alert(1)">x</a></p>','<p><a id="page" href="javascript:alert(1)"/></p>','<p><foo>x</foo></p>'):
             with self.subTest(markup=markup),self.assertRaises(InlineAlignmentError):InlinePlan(self.root(markup),OnlyPolicy(preserve_inline=True))
 
     def test_real_only_branch_failure_keeps_original(self):
