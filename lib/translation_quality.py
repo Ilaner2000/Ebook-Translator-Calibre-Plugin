@@ -40,8 +40,10 @@ def normalize_translation(source, target):
             raise TranslationQualityError('invalid or incomplete UTF8 byte-token sequence') from error
 
     normalized = BYTE_RUN.sub(decode, target)
-    if BYTE_LIKE.search(normalized) or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', normalized):
+    if BYTE_LIKE.search(normalized):
         raise TranslationQualityError('unrestored/malformed byte-token sequence')
+    if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]', normalized):
+        raise TranslationQualityError('XML 1.0 forbidden character in translation')
     readable = _readable(normalized)
     repeated = _longest_repeat(readable)
     # Require >=16 adjacent repetitions, >=64 chars and >=half the target.

@@ -52,7 +52,7 @@ The flag and target commit together; stale/corrupt flags do not bypass strict
 validation. Reopening the cache recognizes valid degraded targets without
 retranslating them. The r3 run completed 2,172 required rows, but its output
 quality was rejected: nonempty coverage did not detect byte-token strings or
-a runaway table label. r4 permits only the eight row exceptions listed below.
+a runaway table label. r4 permits only the eleven row exceptions listed below.
 
 ## r4 quality gate and bounded repair (T187:m1684)
 
@@ -72,14 +72,25 @@ paragraphs. Marker-bearing paragraphs retain their single legacy fallback;
 only a failed whole paragraph counts toward consecutive terminal failures.
 Valid warm byte sequences are normalized in memory for rendering only. Their
 native target bytes and hash-bound degraded flag are not written back. Fresh
-normalized targets and flags still persist through the native callback.
+normalized targets and flags still persist through the native callback. View
+provenance binds source MD5/original/normalized value, so repeated use of the
+same paragraph object stays render-only while a later explicit target edit
+does not get silently swallowed. XML 1.0 forbidden scalars fail inside retry.
+V2 and its paired bilingual pass bypass the legacy repeated-letter compressor;
+it would truncate exact decimals such as `0.0000000000001` to `0.00001` after
+validation. Unrelated legacy modes retain their existing behavior.
 
-cc explicitly approved retranslation of rows
-`926,1344,1386,1428,1654,1890,1964,2209` for source book **#13490**. Only three
-of the previous 1,405 rows are exceptions: `1344,1386,1428`; the other 1,402
+Known limits: source prose containing literal `<0x` syntax is rejected (for
+example some programming books); that case needs a separately designed escape
+contract. Repetition below the conservative density threshold still requires
+human reading. Neither limit affects this book's approved repair shape.
+
+cc explicitly approved retranslation of rows (m1684, expanded by m1688)
+`926,1021,1199,1344,1386,1428,1654,1680,1890,1964,2209` for source book **#13490**. Only five
+of the previous 1,405 rows are exceptions: `1021,1199,1344,1386,1428`; the other 1,400
 must remain identical, and all source columns remain unchanged. Legitimate
 UTF8 decoding does not correct wrong words (for example tauon rendered as pi
-or a red herring rendered as a different Chinese word). The eight new results
+or a red herring rendered as a different Chinese word). The eleven new results
 must therefore be compared with their source by cc1 and presented to AY.
 
 `tools/invalidate_translation_rows.py` is an operator utility run via
@@ -94,7 +105,7 @@ Do not expand the reviewed manifest or directly edit SQL/cache/config files.
 
 The run3 problem EPUBs/logs and snapshot are retained as evidence. Before the
 same official `run.py` writes its output paths again, cc1 must preserve those
-files and record matching SHA256s. The eight-row real model run, zero byte-token
+files and record matching SHA256s. The eleven-row real model run, zero byte-token
 hits in body and NCX, source/other-cache invariants and fresh output review are
 release gates. Offline identity-response replays only prove mechanics.
 

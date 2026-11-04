@@ -275,6 +275,10 @@ class PageElement(Element):
 
     def _polish_translation(self, translation):
         translation = translation.replace('\n', '<br/>')
+        if getattr(self, 'preserve_translation_text', False):
+            # V2 validates runaway repetition before rendering. The legacy
+            # compressor also truncates digits (0.0000000000001 -> 0.00001).
+            return translation
         # Condense consecutive letters to a maximum of four.
         return re.sub(r'((\w)\2{3})\2*', r'\1', translation)
 
@@ -844,6 +848,9 @@ class ElementHandler:
             element.set_translation_color(self.translation_color)
             element.set_vertical_gap(self.vertical_gap)
             element.set_only_policy(getattr(self, 'only_policy', None))
+            element.preserve_translation_text = bool(
+                (self.position == 'only' and getattr(self, 'only_policy', None) and self.only_policy.preserve_inline)
+                or getattr(self, 'inline_cache_to_plain', False))
             if self.column_gap is not None:
                 element.set_column_gap(self.column_gap)
             element.set_remove_pattern(self.remove_pattern)

@@ -24,7 +24,8 @@ class TestTranslationQuality(unittest.TestCase):
 
     def test_invalid_partial_overlong_surrogate_and_malformed_rejected(self):
         for target in ['1<0x80>00', '<0xF0>', '<0xC0><0xAF>', '<0xED><0xA0><0x80>',
-                       '<0xF4><0x90><0x80><0x80>', '<0xGG>', '<0x00>', '<0xE9>']:
+                       '<0xF4><0x90><0x80><0x80>', '<0xGG>', '<0x00>', '<0xE9>',
+                       '<0xEF><0xBF><0xBE>', '<0xEF><0xBF><0xBF>', '\ufffe', '\ud800']:
             with self.subTest(target=target), self.assertRaises(TranslationQualityError):
                 normalize_translation('source', target)
 
@@ -99,6 +100,29 @@ class TestTranslationQuality(unittest.TestCase):
             self.assertEqual('錮', p.translation); self.assertTrue(p.is_cache)
             self.assertEqual(0, worker.abort_count); engine.translate.assert_not_called(); callback.assert_not_called()
 
+    def test_same_warm_object_can_reenter_without_persisting_normalized_view(self):
+        for strict in [True, False]:
+            worker, engine = self.worker([], strict)
+            p = self.paragraph(); p.translation = '<0xE9><0x8C><0xAE>'
+            callback = Mock(); worker.set_callback(callback); worker.progress_bar.load(3)
+            for _ in range(3):
+                worker.translate_paragraph(p); worker.process_translation(p)
+            self.assertEqual('錮', p.translation); engine.translate.assert_not_called(); callback.assert_not_called()
+
+    def test_warm_view_provenance_does_not_swallow_later_manual_target_edit(self):
+        worker, engine = self.worker([]); p = self.paragraph(); p.translation = '<0xE9><0x8C><0xAE>'
+        callback = Mock(); worker.set_callback(callback); worker.progress_bar.load(2)
+        worker.translate_paragraph(p); worker.process_translation(p); callback.assert_not_called()
+        p.translation = '人工改譯'
+        worker.translate_paragraph(p); worker.process_translation(p)
+        callback.assert_called_once_with(p); self.assertFalse(p.memory_normalized)
+
+    @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
+    def test_xml_forbidden_but_utf8_legal_response_retries_before_render(self, sleep):
+        worker, engine = self.worker(['<0xEF><0xBF><0xBE>', '正確'])
+        p = self.paragraph(); worker.translate_paragraph(p)
+        self.assertEqual(2, engine.translate.call_count); self.assertEqual('正確', p.translation)
+
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_bad_warm_cache_repairs_through_provider_path(self, sleep):
         worker, engine = self.worker(['<0x80>', '正確譯文'])
@@ -118,3 +142,18 @@ class TestTranslationQuality(unittest.TestCase):
             before = etree.tostring(root)
             with self.assertRaises(TranslationQualityError): handler.add_translations([p])
             self.assertEqual(before, etree.tostring(root))
+
+    def test_both_v2_renderers_preserve_exact_decimal_and_source_literal_repetition(self):
+        for position in ['only', 'below']:
+            root = etree.fromstring(b'<div><p>Volume 0.0000000000001%</p></div>')
+            handler = ElementHandler(Base.placeholder, Base.separator, position)
+            handler.set_only_policy({'preserve_inline': True} if position == 'only' else None)
+            handler.inline_cache_to_plain = position == 'below'
+            handler.load_remove_rules(); handler.load_reserve_rules()
+            p = Paragraph(*handler.prepare_original([PageElement(root[0])])[0]); p.translation = '體積 0.0000000000001%'
+            handler.add_translations([p])
+            self.assertIn('體積 0.0000000000001%', ''.join(root.itertext()))
+
+    def test_unrelated_legacy_polish_behavior_unchanged(self):
+        element = PageElement(etree.fromstring(b'<p>source</p>'))
+        self.assertEqual('0.00001', element._polish_translation('0.0000000000001'))

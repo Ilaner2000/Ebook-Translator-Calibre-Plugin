@@ -227,7 +227,6 @@ class Translation:
         raise TranslationFailed('V2 paragraph and available legacy fallback failed: %s' % last_error)
 
     def translate_paragraph(self, paragraph):
-        paragraph.memory_normalized = False
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         if paragraph.translation and not self.fresh:
@@ -236,8 +235,11 @@ class Translation:
                     normalized = normalize_translation(paragraph.original, paragraph.translation)
                     validate_inline_translation(paragraph.original, normalized, self.translator.placeholder,
                                                 degraded=getattr(paragraph, 'degraded', False) is True)
-                    paragraph.memory_normalized = normalized != paragraph.translation
+                    old_view = getattr(paragraph, '_normalized_cache_view', None)
+                    same_view = old_view == (getattr(paragraph, 'md5', None), paragraph.original, paragraph.translation)
+                    paragraph.memory_normalized = normalized != paragraph.translation or same_view
                     paragraph.translation = normalized
+                    paragraph._normalized_cache_view = (getattr(paragraph, 'md5', None), paragraph.original, normalized) if paragraph.memory_normalized else None
                 paragraph.is_cache = True
                 if self.quality_enabled():
                     self.abort_count = 0
@@ -246,6 +248,8 @@ class Translation:
                 # Repair through the official provider/cache path, never use a
                 # corrupt cached response just because its MD5 matched.
                 paragraph.translation = None
+        paragraph.memory_normalized = False
+        paragraph._normalized_cache_view = None
         self.streaming('')
         self.streaming(_('Translating...'))
         text = self.glossary.replace(paragraph.original)
@@ -289,7 +293,10 @@ class Translation:
         self.streaming(paragraph)
         # A decoded warm result is a render-only view. Its native target and
         # hash-bound degraded metadata must remain byte/value-identical.
-        if not (paragraph.is_cache and getattr(paragraph, 'memory_normalized', False)):
+        normalized_view = getattr(paragraph, '_normalized_cache_view', None)
+        if not (self.quality_enabled() and paragraph.is_cache
+                and getattr(paragraph, 'memory_normalized', False)
+                and normalized_view == (getattr(paragraph, 'md5', None), paragraph.original, paragraph.translation)):
             self.callback(paragraph)
 
         row = paragraph.row
