@@ -179,10 +179,15 @@ def prepare_inline_body(body, source):
     return value
 
 
-def validate_inline_translation(source, target, placeholder):
+def validate_inline_translation(source, target, placeholder, degraded=False):
     """Validate provider/cache text before committing it to the native cache."""
     if not isinstance(source, str) or not isinstance(target, str) or not target.strip():
         raise InlineAlignmentError('empty or invalid translated paragraph')
+    if degraded:
+        # An explicit, persisted per-paragraph decision permits legacy text.
+        # Reserve placeholders still have to match; arbitrary markerless cache
+        # responses never acquire this permission by inference.
+        source = TOKEN.sub('', source)
 
     def pairs(text):
         stack, seen, parents, empty = [], set(), {}, set()
@@ -221,6 +226,7 @@ class InlinePlan:
         self.parents = {}
         self.opening = {}
         self.leading_anchors = []
+        self.source_links = []
         self.zero_width = set()
         root = copy.deepcopy(source)
         if any(MARKER_ATTR in x.attrib for x in root.iter() if isinstance(x.tag, str)):
@@ -295,6 +301,8 @@ class InlinePlan:
             href = child.get('href', '').strip()
             if re.match(r'(?i)\s*(?:javascript|data|vbscript):', href):
                 raise InlineAlignmentError('unsafe source hyperlink scheme')
+            if name == 'a' and not empty_anchor:
+                self.source_links.append(copy.deepcopy(child))
             if empty_anchor and parent is None and not text.strip():
                 anchor = copy.deepcopy(child)
                 anchor.tail = None

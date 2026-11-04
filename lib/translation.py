@@ -14,7 +14,7 @@ from .utils import log, sep, trim, dummy, traceback_error
 from .config import get_config
 from .exception import TranslationFailed, TranslationCanceled
 from .handler import Handler
-from .only_mode import InlineAlignmentError, validate_inline_translation
+from .only_mode import InlineAlignmentError, TOKEN, validate_inline_translation
 
 
 load_translations()  # type: ignore
@@ -72,6 +72,13 @@ class ProgressBar:
         return self._count
 
 
+class InlineResult(str):
+    def __new__(cls, value, degraded=False):
+        instance = str.__new__(cls, value)
+        instance.degraded = degraded
+        return instance
+
+
 class Translation:
     def __init__(self, translator, glossary):
         self.translator = translator
@@ -124,6 +131,8 @@ class Translation:
         * https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html
         * https://api.fanyi.baidu.com/doc/21
         """
+        if self.strict_inline:
+            return self._translate_inline_text(row, text)
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         try:
@@ -158,14 +167,69 @@ class Translation:
             time.sleep(interval)
             return self.translate_text(row, text, retry, interval)
 
+    def _translate_inline_text(self, row, text):
+        """Retry V2, then one declared legacy attempt, counting failed ROWS.
+
+        The engine/config/cache identity is unchanged. No shared translator
+        flags are toggled during concurrent requests.
+        """
+        last_error = None
+        attempt = 0
+        while True:
+            if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
+                raise TranslationCanceled(_('Translation canceled.'))
+            try:
+                target = self.translator.translate(text)
+                if isinstance(target, GeneratorType):
+                    target = ''.join(target)
+                validate_inline_translation(text, target, self.translator.placeholder)
+                self.abort_count = 0
+                return InlineResult(target)
+            except TranslationCanceled:
+                raise
+            except Exception as err:
+                last_error = err
+                if self.cancel_request() or self.translator.match_error(str(err)):
+                    raise TranslationCanceled(_('Translation canceled.'))
+                if attempt >= self.translator.request_attempt:
+                    break
+                attempt += 1
+                delay = attempt * 5
+                self.log('Row: %s\nOriginal: %s\nStatus: Failed %s times / Sleeping for %s seconds\nError: %s' %
+                         (row, text[:200], attempt, delay, str(err)), True)
+                time.sleep(delay)
+        if TOKEN.search(text):
+            if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
+                raise TranslationCanceled(_('Translation canceled.'))
+            try:
+                plain = trim(TOKEN.sub('', text))
+                target = self.translator.translate(plain)
+                if isinstance(target, GeneratorType):
+                    target = ''.join(target)
+                validate_inline_translation(text, target, self.translator.placeholder, degraded=True)
+                self.abort_count = 0
+                return InlineResult(target, degraded=True)
+            except TranslationCanceled:
+                raise
+            except Exception as err:
+                last_error = err
+                if self.cancel_request() or self.translator.match_error(str(err)):
+                    raise TranslationCanceled(_('Translation canceled.'))
+        # All attempts including fallback failed: one terminal paragraph error.
+        self.abort_count += 1
+        raise TranslationFailed('V2 paragraph and available legacy fallback failed: %s' % last_error)
+
     def translate_paragraph(self, paragraph):
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         if paragraph.translation and not self.fresh:
             try:
                 if self.strict_inline:
-                    validate_inline_translation(paragraph.original, paragraph.translation, self.translator.placeholder)
+                    validate_inline_translation(paragraph.original, paragraph.translation, self.translator.placeholder,
+                                                degraded=getattr(paragraph, 'degraded', False) is True)
                 paragraph.is_cache = True
+                if self.strict_inline:
+                    self.abort_count = 0
                 return
             except InlineAlignmentError:
                 # Repair through the official provider/cache path, never use a
@@ -175,6 +239,7 @@ class Translation:
         self.streaming(_('Translating...'))
         text = self.glossary.replace(paragraph.original)
         translation = self.translate_text(paragraph.row, text)
+        degraded = getattr(translation, 'degraded', False) is True
         # Process streaming text
         if isinstance(translation, GeneratorType):
             if self.total == 1:
@@ -193,7 +258,9 @@ class Translation:
             translation = temp
         translation = self.glossary.restore(translation)
         if self.strict_inline:
-            validate_inline_translation(paragraph.original, translation, self.translator.placeholder)
+            validate_inline_translation(paragraph.original, translation, self.translator.placeholder, degraded=degraded)
+            paragraph.degraded = degraded
+            paragraph.degrade_reason = 'inline_protocol_exhausted' if degraded else None
         paragraph.translation = translation.strip()
         # Apply aligment checking and processing.
         if self.translator.merge_enabled:
@@ -213,6 +280,11 @@ class Translation:
         row = paragraph.row
         original = paragraph.original.strip()
         if paragraph.error is None:
+            if getattr(paragraph, 'degraded', False) is True:
+                self.log('degraded: ' + json.dumps({
+                    'row': paragraph.row, 'id': paragraph.id, 'page': paragraph.page,
+                    'source_md5': paragraph.md5, 'cached': paragraph.is_cache,
+                    'reason': paragraph.degrade_reason}, ensure_ascii=False))
             self.log(sep())
             if row >= 0:
                 self.log(_('Row: {}').format(row))
@@ -251,6 +323,10 @@ class Translation:
             raise Exception(_('Translation failed.'))
         consuming = round((time.time() - start_time) / 60, 2)
         self.log(_('Time consuming: {} minutes').format(consuming))
+        if self.strict_inline:
+            degraded_rows = [{'id': p.id, 'page': p.page, 'source_md5': p.md5}
+                             for p in paragraphs if getattr(p, 'degraded', False) is True and p.error is None]
+            self.log('degraded summary: ' + json.dumps({'count': len(degraded_rows), 'paragraphs': degraded_rows}, ensure_ascii=False))
         if self.strict_inline and hasattr(self.translator, 'get_session_usage'):
             self.log('Provider token usage: ' + json.dumps(self.translator.get_session_usage(), sort_keys=True))
         self.log(_('Translation completed.'))

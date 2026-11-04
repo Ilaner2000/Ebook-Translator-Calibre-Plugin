@@ -43,6 +43,7 @@ class Element:
         self.vertical_gap = 0.0
         self.only_policy = None
         self.inline_plan = None
+        self.degraded = False
 
         self.position = None
         self.target_direction = None
@@ -364,7 +365,7 @@ class PageElement(Element):
             translation = re.sub(
                 xml_escape(pattern), lambda _: element, translation)
         translation = self._polish_translation(translation)
-        if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline:
+        if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline and not self.degraded:
             if self.inline_plan is None:
                 raise InlineAlignmentError('A2 requires prepared marker content before rendering')
             translation = self.inline_plan.restore_xml(translation)
@@ -382,6 +383,47 @@ class PageElement(Element):
         new_element = self._create_new_element(
             element_name, translation,
             apply_inline_gap=is_text_element and is_table_descendant)
+        if self.position == 'only' and self.degraded and self.inline_plan is not None:
+            # Legacy fallback discards inline styling; keep invisible location
+            # anchors as explicit paragraph-start anchors instead of losing IDs.
+            anchors = list(self.inline_plan.leading_anchors) + [
+                self.inline_plan.templates[key] for key in self.inline_plan.templates
+                if key in self.inline_plan.zero_width]
+            # Other discarded inline nodes can also be backlink destinations.
+            # Retain their IDs as empty anchors; active link IDs remain on the
+            # original-label references below, so no ID is duplicated.
+            for template in self.inline_plan.templates.values():
+                if get_name(template) != 'a' and (template.get('id') or template.get('name')):
+                    tag = template.tag.rsplit('}', 1)[0] + '}a' if '}' in template.tag else 'a'
+                    anchor = etree.Element(tag)
+                    for key in ('id', 'name'):
+                        if template.get(key):anchor.set(key, template.get(key))
+                    anchors.append(anchor)
+            for template in reversed(anchors):
+                anchor = copy.deepcopy(template)
+                anchor.tail = new_element.text
+                new_element.text = None
+                new_element.insert(0, anchor)
+            for original in self.inline_plan.source_links:
+                label = ''.join(original.itertext())
+                if self.placeholder:
+                    label = re.sub(self.placeholder[1].format(r'\d+'), '', label)
+                link = copy.deepcopy(original)
+                link.clear(keep_tail=False)
+                link.attrib.update(original.attrib)
+                link.text = trim(label) or original.get('title') or original.get('aria-label') or '↗'
+                if len(new_element):
+                    last = new_element[-1]; last.tail = (last.tail or '') + ' '
+                else:
+                    new_element.text = (new_element.text or '') + ' '
+                new_element.append(link)
+            self.degraded_effects = {
+                'id': getattr(self, 'source_oid', None), 'page': self.page_id,
+                'root_id': self.element.get('id'),
+                'moved_anchor_count': len(anchors),
+                'moved_link_count': len(self.inline_plan.source_links),
+                'summary': self.get_text()[:120]}
+            log.info('degraded render: ' + json.dumps(self.degraded_effects, ensure_ascii=False))
 
         # Add translation for table elements.
         if element_name in group_elements:
@@ -781,6 +823,7 @@ class ElementHandler:
     def prepare_original(self, elements):
         count = 0
         for oid, element in enumerate(elements):
+            element.source_oid = oid
             element.set_placeholder(self.placeholder)
             element.set_position(self.position)
             element.set_target_direction(self.target_direction)
@@ -811,6 +854,7 @@ class ElementHandler:
 
     def prepare_translation(self, paragraphs):
         translations = {}
+        self.degraded_originals = {}
         for paragraph in paragraphs:
             original, translated = paragraph.original, paragraph.translation
             if getattr(self, 'inline_cache_to_plain', False):
@@ -821,6 +865,7 @@ class ElementHandler:
                 if translated is not None:
                     translated = TOKEN.sub('', translated)
             translations[original] = translated
+            self.degraded_originals[original] = getattr(paragraph, 'degraded', False) is True
         return translations
 
     def add_translations(self, paragraphs):
@@ -832,9 +877,11 @@ class ElementHandler:
                 try:
                     if paragraph.error:
                         raise InlineAlignmentError('paragraph has translation error')
-                    validate_inline_translation(paragraph.original, paragraph.translation, self.placeholder)
+                    validate_inline_translation(paragraph.original, paragraph.translation, self.placeholder,
+                                                degraded=getattr(paragraph, 'degraded', False) is True)
                 except InlineAlignmentError:
-                    failures.append(str(paragraph.row))
+                    failures.append(str(paragraph.row) if paragraph.row >= 0 else
+                                    'id=%s,page=%s' % (getattr(paragraph, 'id', '?'), getattr(paragraph, 'page', '?')))
             if failures:
                 raise InlineAlignmentError('V2 output blocked; failed paragraph rows: ' + ','.join(failures))
             # Cache rows must cover the current extraction, not merely be
@@ -843,7 +890,8 @@ class ElementHandler:
                 if not element.ignored:
                     original = element.get_content()
                     try:
-                        validate_inline_translation(original, translations.get(original), self.placeholder)
+                        validate_inline_translation(original, translations.get(original), self.placeholder,
+                                                    degraded=self.degraded_originals.get(original, False))
                     except InlineAlignmentError as err:
                         raise InlineAlignmentError('V2 output blocked; extraction/cache mismatch at element %s' % eid) from err
         if getattr(self, 'inline_cache_to_plain', False):
@@ -864,6 +912,7 @@ class ElementHandler:
             if translation is None:
                 element.add_translation()
                 continue
+            element.degraded = getattr(self, 'degraded_originals', {}).get(original, False)
             element.add_translation(translation)
             self.elements.pop(eid)
 

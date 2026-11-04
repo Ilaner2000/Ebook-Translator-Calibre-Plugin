@@ -1,7 +1,7 @@
 # S745: V2 only-mode release and first-book acceptance
 
 This release incorporates S740 `b16b1f07ae2d061ae98ca50648d3800bfcc503cb`
-into the local translation fork. Plugin version: **2.4.3**.
+into the local translation fork. Plugin version: **2.4.4** (S745 r3).
 
 ## Default behavior
 
@@ -26,8 +26,31 @@ JSON chat `messages`. Unsupported request formats fail before that request;
 other engine protocols have not been qualified. Source markers, exact reserve
 tokens, nesting, and empty anchors are validated inside the existing retry
 loop before a successful response enters the native cache. Invalid cached
-responses are retried through that same pipeline. The whole output fails if
+responses are retried through that same pipeline. Under T187:m1651/m1654, a
+paragraph that exhausts V2 retries gets **one** legacy plain-text request. A
+successful fallback is explicitly marked `degraded`; its reserved placeholders
+must still match. Retries do not each consume the abort allowance: only an
+entire paragraph that also fails fallback counts once, and successful cache
+hits reset that consecutive-failure count. Cancellation/fatal provider errors
+retain their cancellation behavior. The whole output still fails if
 any required paragraph is missing/failed or does not match current extraction.
+
+Only degraded paragraphs discard inline styling. Root attributes, IDs and
+existing sup/img/math reserves remain; empty location anchors move to the
+paragraph start. Original nonempty links keep their href/id and original label
+at the paragraph end as references (m1654), including footnote return targets.
+Labels omit reserve tokens so images/math are not duplicated; a link with only
+reserved content gets a reference arrow. Other discarded inline IDs remain as
+empty start anchors. Ordinary V2 paragraphs do not use this path. `degraded
+render` logs contain each source id/page, a summary and moved anchor/link counts
+for AY to judge this visible compromise.
+
+Fallback state is persisted by the plugin in the existing cache **info** table,
+bound to source MD5 and target SHA256. It is not inferred from missing markers,
+not embedded in display text, and does not require a schema or identity change.
+The flag and target commit together; stale/corrupt flags do not bypass strict
+validation. Reopening the cache recognizes valid degraded targets without
+retranslating them. The existing 1,405 completed rows resume unchanged.
 
 V2 uses the plugin's ordinary persistent cache with a `|only-inline-v2` identity
 suffix. Its marked originals must not be confused with legacy plain originals.
@@ -45,7 +68,7 @@ verifies the supplied SHA256 and installs with:
 ```
 
 cc5 reports installation to cc, who owns `/admin/restart-calibre`. Confirm
-version 2.4.3 and its module origin after restart before translating. Do not
+version 2.4.4 and its module origin after restart before translating. Do not
 install/restart while another Calibre job is running. Keep the previous ZIP
 available before installation. No push is part of this delivery.
 
@@ -81,7 +104,7 @@ the THOROUGH acceptance. cx1 retains review/fix/handback ownership throughout.
 
 ## Rollback
 
-Before installation, retain the previous installed plugin ZIP with its SHA256
+Before r3 installation, retain the currently installed 2.4.3 r2 ZIP with its SHA256
 in the authorized backup layer. A ZIP rebuilt from sealed source `b01169f4a23b6c43a9618b1df78a9be52b5ac259`
 is a source-level rollback and must not be labeled a byte-identical copy of the
 old installed ZIP. cc5 confirms the actual pre-install baseline.

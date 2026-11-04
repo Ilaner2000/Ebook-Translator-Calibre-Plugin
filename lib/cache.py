@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import os.path
 import tempfile
+import hashlib
 from datetime import datetime
 from glob import glob
 
@@ -37,6 +38,8 @@ class Paragraph:
         self.is_cache = False
         self.error = None
         self.aligned = True
+        self.degraded = False
+        self.degrade_reason = None
 
     def get_attributes(self) -> dict:
         if self.attributes:
@@ -292,25 +295,56 @@ class TranslationCache:
             self.destroy()
 
     def paragraph(self, id=None):
-        return Paragraph(*self.first(id=id))
+        return self._paragraph(self.first(id=id))
 
     def get_paragraphs(self, ids):
-        return [Paragraph(*item) for item in self.get(ids)]
+        return [self._paragraph(item) for item in self.get(ids)]
+
+    def _paragraph(self, item):
+        paragraph = Paragraph(*item)
+        raw = self.get_info('only_v2_degraded:' + str(paragraph.id))
+        if raw and isinstance(paragraph.translation, str):
+            try:
+                info = json.loads(raw)
+                from .only_mode import TOKEN
+                if (isinstance(info, dict) and info.get('version') == 1
+                        and TOKEN.search(paragraph.original)
+                        and info.get('source_md5') == paragraph.md5
+                        and info.get('translation_sha256') == hashlib.sha256(paragraph.translation.encode('utf-8')).hexdigest()):
+                    paragraph.degraded = True
+                    paragraph.degrade_reason = info.get('reason')
+            except (ValueError, TypeError):
+                pass  # No valid explicit metadata => normal strict validation.
+        return paragraph
 
     def all_paragraphs(self):
         paragraphs = []
         for item in self.all():
-            paragraph = Paragraph(*item)
+            paragraph = self._paragraph(item)
             if self.cache_only and not paragraph.translation:
                 continue
             paragraphs.append(paragraph)
         return paragraphs
 
     def update_paragraph(self, paragraph):
-        self.update(
-            paragraph.id, translation=paragraph.translation,
-            engine_name=paragraph.engine_name,
-            target_lang=paragraph.target_lang)
+        key = 'only_v2_degraded:' + str(paragraph.id)
+        try:
+            if getattr(paragraph, 'degraded', False) is True and paragraph.translation:
+                value = json.dumps({
+                    'version': 1, 'source_md5': paragraph.md5,
+                    'translation_sha256': hashlib.sha256(paragraph.translation.encode('utf-8')).hexdigest(),
+                    'reason': paragraph.degrade_reason or 'inline_protocol_exhausted'})
+                self.cursor.execute('INSERT INTO info VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value', (key, value))
+            else:
+                self.cursor.execute('DELETE FROM info WHERE key=?', (key,))
+            # update() commits the target and its flag in the SAME transaction.
+            self.update(
+                paragraph.id, translation=paragraph.translation,
+                engine_name=paragraph.engine_name,
+                target_lang=paragraph.target_lang)
+        except Exception:
+            self.connection.rollback()
+            raise
 
     def delete_paragraphs(self, paragraphs):
         self.delete([paragraph.id for paragraph in paragraphs])
