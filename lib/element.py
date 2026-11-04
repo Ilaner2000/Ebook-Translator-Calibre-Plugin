@@ -251,7 +251,13 @@ class PageElement(Element):
         elements = []
         if self.reserve_pattern is not None:
             elements = element_copy.xpath(self.reserve_pattern, namespaces=ns)
+        reserved_roots = set()
         for eid, element in enumerate(elements):
+            if any(parent in reserved_roots for parent in element.iterancestors()):
+                # Keep the ORIGINAL eid slot, including gaps: cached marked
+                # originals must not change when a reserve contains a reserve.
+                self.reserve_elements.append(None)
+                continue
             replacement = self.placeholder[0].format(format(eid, '05'))
             if get_name(element) in ('sub', 'sup'):
                 parent = element.getparent()
@@ -260,6 +266,7 @@ class PageElement(Element):
                         len(parent.getchildren()) == 1:
                     elements[eid] = element = parent
             self.reserve_elements.append(get_string(element, True))
+            reserved_roots.add(element)
             self._safe_remove(element, replacement)
         if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline:
             self.inline_plan = InlinePlan(element_copy, self.only_policy)
@@ -350,15 +357,20 @@ class PageElement(Element):
         if self.position == 'only' and self.only_policy and self.only_policy.preserve_inline:
             # A valid semantic pair alone is insufficient when its footnote,
             # image, or other reserved content has been lost or duplicated.
-            for rid in range(len(self.reserve_elements)):
+            for rid, reserve in enumerate(self.reserve_elements):
+                if reserve is None:
+                    continue
                 pattern = self.placeholder[1].format(r'\s*'.join(format(rid, '05')))
                 if len(list(re.finditer(xml_escape(pattern), translation))) != 1:
                     raise InlineAlignmentError('missing or duplicate reserve placeholder')
-            if self.reserve_elements:
+            active_reserves = sum(value is not None for value in self.reserve_elements)
+            if active_reserves:
                 any_reserve = xml_escape(self.placeholder[1].format(r'\d+'))
-                if len(list(re.finditer(any_reserve, translation))) != len(self.reserve_elements):
+                if len(list(re.finditer(any_reserve, translation))) != active_reserves:
                     raise InlineAlignmentError('unknown reserve placeholder')
         for rid, element in enumerate(self.reserve_elements):
+            if element is None:
+                continue
             pattern = self.placeholder[1].format(
                 r'\s*'.join(format(rid, '05')))
             # Prevent processe any backslash escapes in the replacement.
@@ -392,7 +404,7 @@ class PageElement(Element):
             # Other discarded inline nodes can also be backlink destinations.
             # Retain their IDs as empty anchors; active link IDs remain on the
             # original-label references below, so no ID is duplicated.
-            for template in self.inline_plan.templates.values():
+            for template in (*self.inline_plan.templates.values(), *self.inline_plan.opening.values()):
                 if get_name(template) != 'a' and (template.get('id') or template.get('name')):
                     tag = template.tag.rsplit('}', 1)[0] + '}a' if '}' in template.tag else 'a'
                     anchor = etree.Element(tag)

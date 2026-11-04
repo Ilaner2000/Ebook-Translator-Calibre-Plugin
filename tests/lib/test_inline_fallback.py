@@ -159,6 +159,30 @@ class TestInlineFallback(unittest.TestCase):
         self.assertEqual('figure.xhtml', root[0].find('a[@id="imgref"]').get('href'))
         self.assertNotIn('{{id_', etree.tostring(root).decode())
 
+    def test_degraded_opening_run_keeps_both_dropcap_and_firstline_ids(self):
+        root = etree.fromstring(b'<div><p id="p1"><span id="dropcap" class="_idGenDropcap-1">I</span><span id="firstline" class="first-line">n a place</span></p></div>')
+        handler, p = self.handler(root); p.translation = '在某個地方'; p.degraded = True
+        handler.add_translations([p])
+        self.assertIsNotNone(root.find('.//a[@id="dropcap"]'))
+        self.assertIsNotNone(root.find('.//a[@id="firstline"]'))
+        self.assertEqual({'p1','dropcap','firstline'}, {n.get('id') for n in root.iter() if n.get('id')})
+
+    def test_overlapping_reserves_keep_cached_placeholder_numbers_in_both_modes(self):
+        expected = '⟦ET0O⟧word⟦ET0C⟧{{id_00000}}{{id_00002}}'
+        for degraded in (False, True):
+            root = etree.fromstring(b'<div><p><em>word</em><sup id="note"><img id="icon" src="x.png"/></sup><br/></p></div>')
+            handler, p = self.handler(root)
+            self.assertEqual(expected, p.original)
+            self.assertEqual(uid('0' + expected), p.md5)
+            p.translation = '譯文{{id_00000}}{{id_00002}}' if degraded else p.original.replace('word','詞')
+            p.degraded = degraded; handler.add_translations([p])
+            with self.subTest(degraded=degraded):
+                self.assertEqual(1, len(root.findall('.//sup')))
+                self.assertEqual(1, len(root.findall('.//img')))
+                self.assertEqual(1, len(root.findall('.//br')))
+                self.assertEqual('icon', root.find('.//img').get('id'))
+                self.assertNotIn('{{id_', etree.tostring(root).decode())
+
     def test_paired_degraded_translation_is_used_without_markers(self):
         root = etree.fromstring(b'<div><p>Some <em> word </em> here.</p></div>')
         handler, p = self.handler(root, 'below'); handler.inline_cache_to_plain = True
