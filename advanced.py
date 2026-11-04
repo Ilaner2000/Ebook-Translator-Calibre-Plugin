@@ -18,7 +18,7 @@ from .lib.encodings import encoding_list
 from .lib.cache import Paragraph, get_cache
 from .lib.translation import get_engine_class, get_translator, get_translation
 from .lib.element import get_element_handler
-from .lib.conversion import extract_item, extra_formats
+from .lib.conversion import extract_item, extra_formats, translation_cache_identity
 from .engines.openai import ChatgptTranslate, ChatgptBatchTranslate
 from .engines.custom import CustomTranslate
 from .components import (
@@ -94,9 +94,9 @@ class PreparationWorker(QObject):
         encoding = ''
         if self.ebook.encoding.lower() != 'utf-8':
             encoding = self.ebook.encoding.lower()
-        cache_id = uid(
-            input_path + self.engine_class.name + self.ebook.target_lang
-            + merge_length + encoding)
+        cache_id = translation_cache_identity(
+            input_path, self.engine_class.name, self.ebook.target_lang,
+            merge_length, encoding, element_handler)
         cache = get_cache(cache_id)
 
         if cache.is_fresh() or not cache.is_persistence():
@@ -208,6 +208,10 @@ class TranslationWorker(QObject):
         translator.set_source_lang(self.source_lang)
         translator.set_target_lang(self.target_lang)
         translation = get_translation(translator)
+        handler = get_element_handler(translator.placeholder, translator.separator, 'auto')
+        policy = getattr(handler, 'only_policy', None)
+        translation.strict_inline = bool(handler.position == 'only' and policy and policy.preserve_inline)
+        translator.inline_protocol = translation.strict_inline
         translation.set_fresh(fresh)
         translation.set_logging(
             lambda text, error=False: self.logging.emit(text, error))

@@ -26,6 +26,7 @@ class Base:
     method: str = 'POST'
     headers: dict[str, str] = {}
     stream = False
+    inline_protocol = False
 
     need_api_key = True
     api_key_hint = _('API Keys')
@@ -195,9 +196,13 @@ class Base:
     def translate(self, content):
         response = None
         try:
+            body = self.get_body(content)
+            if self.inline_protocol:
+                from ..lib.only_mode import prepare_inline_body
+                body = prepare_inline_body(body, content)
             params = {
                 'url': self.get_endpoint(),
-                'data': self.get_body(content),
+                'data': body,
                 'headers': self.get_headers(),
                 'method': self.method,
                 'proxy_uri': None,

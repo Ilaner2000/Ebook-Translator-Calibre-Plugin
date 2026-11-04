@@ -6,8 +6,10 @@ output raises before the source element is removed.  Existing rendering is
 unchanged when no policy is configured.
 """
 from dataclasses import dataclass
+from collections import Counter
 import copy
 import html
+import json
 import math
 import re
 import unicodedata
@@ -29,6 +31,7 @@ class OnlyPolicy:
     quote_classes: tuple = ('V', 'V_f', 'V_l')
     heading_link_classes: tuple = ('CN', 'CT')
     preserve_inline: bool = False
+    auto_roles: bool = False
     dropcap_classes: tuple = ('_idGenDropcap-1', '_idgendropcap')
     smallcaps_classes: tuple = ('first-line',)
 
@@ -66,7 +69,35 @@ def _classes(node):
     return {x.casefold() for x in node.get('class', '').split()}
 
 
-def apply_typography(node, policy):
+def typography_role(node, policy):
+    """Use explicit roles first, then conservative publisher class semantics.
+
+    Never guess that every p is body text: captions, contents, and notes retain
+    publisher spacing. Context is inspected on the original tree, not a detached
+    output element.
+    """
+    classes = _classes(node)
+    if policy.auto_roles:
+        for ancestor in (node, *node.iterancestors()):
+            if not isinstance(ancestor.tag, str):
+                continue
+            context = ' '.join(_classes(ancestor))
+            role = ancestor.get('role', '') + ' ' + ancestor.get('{http://www.idpf.org/2007/ops}type', '')
+            if (_local(ancestor) == 'aside' or re.search(r'footnote|rearnote|endnote|doc-noteref', role)
+                    or re.search(r'footnote|endnote|caption|(?:^|\s)note(?:\s|$)', context)):
+                return None
+        if any(isinstance(x.tag, str) and _local(x) == 'blockquote'
+               for x in (node, *node.iterancestors())):
+            return 'quote'
+    for role, values in (('intro', policy.intro_classes), ('quote', policy.quote_classes), ('body', policy.body_classes)):
+        if classes & {x.casefold() for x in values}:
+            return role
+    if policy.auto_roles and _local(node) == 'p' and any(re.search(r'body[-_]?text', x) for x in classes):
+        return 'body'
+    return None
+
+
+def apply_typography(node, policy, source=None):
     if policy is None:
         return
     classes = _classes(node)
@@ -82,26 +113,106 @@ def apply_typography(node, policy):
                 continue
             style = link.get('style', '').strip().rstrip(';')
             link.set('style', ';'.join(x for x in (style, 'color:inherit', 'text-decoration:none') if x))
-    body = bool(classes & {x.casefold() for x in policy.body_classes})
-    intro = bool(classes & {x.casefold() for x in policy.intro_classes})
-    quote = bool(classes & {x.casefold() for x in policy.quote_classes})
-    if not (body or intro or quote):
+    role = typography_role(source if source is not None else node, policy)
+    if role is None:
         return
     # No text-indent/font/heading/caption/footnote reset. Intro and verse keep
     # their publisher margins; ordinary body paragraphs get the selected gap.
     styles = [node.get('style', '').strip().rstrip(';'),
               'line-height:%g' % policy.line_height,
               'text-align:%s' % policy.text_align]
-    if body:
+    if role == 'body':
         styles.extend(('margin-top:%gem' % policy.paragraph_gap,
                        'margin-bottom:0'))
     node.set('style', ';'.join(x for x in styles if x))
 
 
 SEMANTIC = frozenset(('a', 'em', 'strong', 'i', 'b', 'small', 'span', 'u',
-                      's', 'cite', 'q', 'del', 'ins', 'mark'))
+                      's', 'cite', 'q', 'del', 'ins', 'mark',
+                      'ul', 'ol', 'li', 'dl', 'dt', 'dd',
+                      # Extraction can select a whole quote/list/table. Pair
+                      # its static child structure too, rather than flatten it.
+                      'p', 'div', 'blockquote', 'pre', 'h1', 'h2', 'h3', 'h4',
+                      'h5', 'h6', 'table', 'thead', 'tbody', 'tfoot', 'tr',
+                      'th', 'td', 'caption'))
 TOKEN = re.compile(r'⟦ET(\d+)(O|C)⟧')
 MARKER_ATTR = 'data-et-inline-marker'
+
+
+INLINE_INSTRUCTION = (
+    'Formatting protocol: Translate only the prose. Copy every protected token '
+    'exactly once, unchanged: paired tokens such as ⟦ET0O⟧ and ⟦ET0C⟧, and '
+    'reserve tokens such as {{id_00000}} or <m id=00000 />. Keep each pair '
+    'around the corresponding translated semantic phrase, with the same nesting '
+    'and parent pair. Sibling phrases may move naturally. Empty pairs must stay '
+    'empty. Do not invent tokens, explanations, markdown fences, or a preamble. '
+    'Return only the translation with these tokens.'
+)
+
+
+def prepare_inline_body(body, source):
+    """Add a per-request protocol to JSON chat messages without editing config.
+
+    Unknown wire formats fail before a protected paragraph is sent. No engine,
+    model, options, chunk size, endpoint, headers, or persistent prompt changes.
+    """
+    if '⟦ET' not in source and '{{id_' not in source and '<m id=' not in source:
+        return body
+    was_bytes = isinstance(body, bytes)
+    was_string = isinstance(body, str)
+    try:
+        value = json.loads(body) if was_bytes or was_string else copy.deepcopy(body)
+    except (ValueError, TypeError):
+        raise InlineAlignmentError('V2 protected text requires a supported JSON chat request')
+    messages = value.get('messages') if isinstance(value, dict) else None
+    if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
+        raise InlineAlignmentError('V2 protected text requires JSON messages; this engine is not qualified')
+    # Append to an existing string system message, or prepend a new one.
+    system = next((m for m in messages if m.get('role') == 'system' and isinstance(m.get('content'), str)), None)
+    if system is None:
+        messages.insert(0, {'role': 'system', 'content': INLINE_INSTRUCTION})
+    else:
+        system['content'] += '\n\n' + INLINE_INSTRUCTION
+    if was_bytes or was_string:
+        result = json.dumps(value, ensure_ascii=False)
+        return result.encode('utf-8') if was_bytes else result
+    return value
+
+
+def validate_inline_translation(source, target, placeholder):
+    """Validate provider/cache text before committing it to the native cache."""
+    if not isinstance(source, str) or not isinstance(target, str) or not target.strip():
+        raise InlineAlignmentError('empty or invalid translated paragraph')
+
+    def pairs(text):
+        stack, seen, parents, empty = [], set(), {}, set()
+        last = 0
+        for match in TOKEN.finditer(text):
+            key, kind = match.groups()
+            if (key, kind) in seen:
+                raise InlineAlignmentError('duplicate inline token')
+            seen.add((key, kind))
+            if kind == 'O':
+                parents[key] = stack[-1] if stack else None
+                stack.append(key)
+            elif not stack or stack.pop() != key:
+                raise InlineAlignmentError('crossed or unbalanced inline tokens')
+            elif last == match.start() and text[last - len('⟦ET' + key + 'O⟧'):last] == '⟦ET' + key + 'O⟧':
+                empty.add(key)
+            last = match.end()
+        if stack or seen != {(key, kind) for key in parents for kind in ('O', 'C')} or '⟦ET' in TOKEN.sub('', text):
+            raise InlineAlignmentError('missing or corrupted inline token')
+        return parents, empty
+
+    expected, empty = pairs(source)
+    actual, target_empty = pairs(target)
+    if expected != actual or not empty <= target_empty:
+        raise InlineAlignmentError('inline token set, parent, or empty anchor changed')
+    if placeholder:
+        pattern = re.compile(placeholder[1].format(r'\d+'))
+        counts = lambda text: Counter(m.group(0) for m in pattern.finditer(text))
+        if counts(source) != counts(target):
+            raise InlineAlignmentError('reserve placeholder set changed')
 
 
 class InlinePlan:

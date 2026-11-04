@@ -26,7 +26,10 @@ class TestFunction(unittest.TestCase):
             'show_notification': True,
             'translation_position': None,
             'vertical_gap': 0.0,
-            'only_typography': None,
+            'only_typography': {
+                'line_height': 1.7, 'paragraph_gap': 0.75, 'text_align': 'start',
+                'preserve_inline': True, 'auto_roles': True,
+            },
             'translation_variants_enabled': False,
             'translation_variant_storage': 'bundle_data',
             'translation_variant_gap': 1.0,

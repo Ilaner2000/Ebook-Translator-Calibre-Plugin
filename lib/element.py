@@ -239,6 +239,10 @@ class PageElement(Element):
 
     def get_content(self):
         element_copy = self._element_copy()
+        # prepare_original and add_translations both extract this element.
+        # Rebuild rather than append: duplicate reserves broke whole-book A2.
+        self.reserve_elements = []
+        self.inline_plan = None
         if self.remove_pattern is not None:
             for noise in element_copy.xpath(
                     self.remove_pattern, namespaces=ns):
@@ -313,7 +317,7 @@ class PageElement(Element):
         if style is not None:
             new_element.set('style', style)
         if self.position == 'only':
-            apply_typography(new_element, self.only_policy)
+            apply_typography(new_element, self.only_policy, self.element)
         return new_element
 
     def _apply_original_color(self):
@@ -808,11 +812,40 @@ class ElementHandler:
     def prepare_translation(self, paragraphs):
         translations = {}
         for paragraph in paragraphs:
-            translations[paragraph.original] = paragraph.translation
+            original, translated = paragraph.original, paragraph.translation
+            if getattr(self, 'inline_cache_to_plain', False):
+                # Paired output's second, cache-only pass uses the very same
+                # V2 responses but retains the legacy bilingual DOM renderer.
+                from .only_mode import TOKEN
+                original = TOKEN.sub('', original)
+                if translated is not None:
+                    translated = TOKEN.sub('', translated)
+            translations[original] = translated
         return translations
 
     def add_translations(self, paragraphs):
         translations = self.prepare_translation(paragraphs)
+        if self.position == 'only' and getattr(self, 'only_policy', None) and self.only_policy.preserve_inline:
+            from .only_mode import validate_inline_translation
+            failures = []
+            for paragraph in paragraphs:
+                try:
+                    if paragraph.error:
+                        raise InlineAlignmentError('paragraph has translation error')
+                    validate_inline_translation(paragraph.original, paragraph.translation, self.placeholder)
+                except InlineAlignmentError:
+                    failures.append(str(paragraph.row))
+            if failures:
+                raise InlineAlignmentError('V2 output blocked; failed paragraph rows: ' + ','.join(failures))
+            # Cache rows must cover the current extraction, not merely be
+            # individually valid legacy rows from a different input contract.
+            for eid, element in self.elements.items():
+                if not element.ignored:
+                    original = element.get_content()
+                    try:
+                        validate_inline_translation(original, translations.get(original), self.placeholder)
+                    except InlineAlignmentError as err:
+                        raise InlineAlignmentError('V2 output blocked; extraction/cache mismatch at element %s' % eid) from err
         for eid, element in self.elements.copy().items():
             if element.ignored:
                 element.add_translation()
@@ -986,7 +1019,7 @@ def get_element_handler(placeholder, separator, direction):
     handler.set_original_color(config.get('original_color'))
     handler.set_translation_color(config.get('translation_color'))
     handler.set_vertical_gap(config.get('vertical_gap', 0.0))
-    handler.set_only_policy(config.get('only_typography') if position == 'only' else None)
+    handler.set_only_policy(config.get('only_typography', {'preserve_inline': True, 'auto_roles': True}) if position == 'only' else None)
     handler.load_remove_rules(
         config.get('ignore_rules', config.get('element_rules', [])))
     handler.load_reserve_rules(config.get('reserve_rules', []))

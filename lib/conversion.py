@@ -102,6 +102,9 @@ def convert_book(
         input_path, output_path, translation, element_handler, cache,
         debug_info, encoding, notification) -> None:
     """Process ebooks that Calibre supported."""
+    policy = getattr(element_handler, 'only_policy', None)
+    translation.strict_inline = bool(element_handler.position == 'only' and policy and policy.preserve_inline)
+    translation.translator.inline_protocol = translation.strict_inline
     plumber = Plumber(
         input_path, output_path, log=log, report_progress=notification)
     _convert = plumber.output_plugin.convert
@@ -259,8 +262,8 @@ def convert_item(
     _encoding = ''
     if encoding.lower() != 'utf-8':
         _encoding = encoding.lower()
-    cache_id = uid(
-        input_path + translator.name + target_lang + merge_length + _encoding)
+    cache_id = translation_cache_identity(
+        input_path, translator.name, target_lang, merge_length, _encoding, element_handler)
     cache = get_cache(cache_id)
     cache.set_cache_only(cache_only)
     cache.set_info('title', ebook_title)
@@ -299,6 +302,14 @@ def convert_item(
     cache.done()
 
 
+def translation_cache_identity(input_path, engine_name, target_lang, merge_length, encoding, handler):
+    # Marker-bearing originals cannot share the legacy plain-text cache table.
+    # Keep the native cache implementation and all its persistence/retry logic.
+    policy = getattr(handler, 'only_policy', None)
+    suffix = '|only-inline-v2' if handler.position == 'only' and policy and policy.preserve_inline else ''
+    return uid(input_path + engine_name + target_lang + merge_length + encoding + suffix)
+
+
 def convert_variants_item(
         ebook_title, input_path, translation_output_path,
         bilingual_output_path, source_lang, target_lang, cache_only,
@@ -316,6 +327,8 @@ def convert_variants_item(
         handler = get_element_handler(
             translator.placeholder, translator.separator, direction)
         handler.position = position
+        handler.set_only_policy(get_config().get(
+            'only_typography', {'preserve_inline': True, 'auto_roles': True}) if position == 'only' else None)
         handler.set_vertical_gap(vertical_gap)
         handler.set_translation_lang(
             translator.get_iso639_target_code(target_lang))
@@ -326,8 +339,8 @@ def convert_variants_item(
     _encoding = ''
     if encoding.lower() != 'utf-8':
         _encoding = encoding.lower()
-    cache_id = uid(
-        input_path + translator.name + target_lang + merge_length + _encoding)
+    cache_id = translation_cache_identity(
+        input_path, translator.name, target_lang, merge_length, _encoding, translation_handler)
     cache = get_cache(cache_id)
     cache.set_cache_only(cache_only)
     cache.set_info('title', ebook_title)
@@ -369,6 +382,8 @@ def convert_variants_item(
     # independent progress total.
     translation.total = 0
     bilingual_handler = create_handler('below', bilingual_gap)
+    bilingual_handler.inline_cache_to_plain = bool(
+        translation_handler.only_policy and translation_handler.only_policy.preserve_inline)
     convertor(
         input_path, bilingual_output_path, translation, bilingual_handler,
         cache, get_debug_info(bilingual_output_path), encoding, notification)

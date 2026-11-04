@@ -1,4 +1,5 @@
 import json
+from threading import Lock
 from typing import Any
 
 from lxml import etree
@@ -111,6 +112,8 @@ class CustomTranslate(Base):
 
     def __init__(self):
         super().__init__()
+        self._usage_lock = Lock()
+        self._session_usage = {'responses': 0, 'reported_responses': 0, 'input_tokens': 0, 'output_tokens': 0}
         self.endpoint = self.request.get('url') or ''
         self.method = self.request.get('method') or 'GET'
 
@@ -140,7 +143,23 @@ class CustomTranslate(Base):
                 response = etree.fromstring(response)
             except Exception:
                 return response
+        # Only provider-reported numeric counters are retained, never request
+        # bodies, prompts, headers, URLs, or credentials. Includes retry cost.
+        if isinstance(response, dict):
+            usage = response.get('usage') or {}
+            incoming = response.get('prompt_eval_count', usage.get('prompt_tokens', usage.get('input_tokens')))
+            outgoing = response.get('eval_count', usage.get('completion_tokens', usage.get('output_tokens')))
+            with self._usage_lock:
+                self._session_usage['responses'] += 1
+                if all(type(x) is int and x >= 0 for x in (incoming, outgoing)):
+                    self._session_usage['reported_responses'] += 1
+                    self._session_usage['input_tokens'] += incoming
+                    self._session_usage['output_tokens'] += outgoing
         result = eval(self.response, {"response": response})
         if not is_str(result):
             raise Exception(_('Response was parsed incorrectly.'))
         return result
+
+    def get_session_usage(self):
+        with self._usage_lock:
+            return dict(self._session_usage)

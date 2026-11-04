@@ -14,6 +14,7 @@ from .utils import log, sep, trim, dummy, traceback_error
 from .config import get_config
 from .exception import TranslationFailed, TranslationCanceled
 from .handler import Handler
+from .only_mode import InlineAlignmentError, validate_inline_translation
 
 
 load_translations()  # type: ignore
@@ -87,6 +88,7 @@ class Translation:
         self.total = 0
         self.progress_bar = ProgressBar()
         self.abort_count = 0
+        self.strict_inline = False
 
     def set_fresh(self, fresh):
         self.fresh = fresh
@@ -126,6 +128,10 @@ class Translation:
             raise TranslationCanceled(_('Translation canceled.'))
         try:
             translation = self.translator.translate(text)
+            if self.strict_inline:
+                if isinstance(translation, GeneratorType):
+                    translation = ''.join(translation)
+                validate_inline_translation(text, translation, self.translator.placeholder)
             self.abort_count = 0
             return translation
         except Exception as e:
@@ -156,8 +162,15 @@ class Translation:
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         if paragraph.translation and not self.fresh:
-            paragraph.is_cache = True
-            return
+            try:
+                if self.strict_inline:
+                    validate_inline_translation(paragraph.original, paragraph.translation, self.translator.placeholder)
+                paragraph.is_cache = True
+                return
+            except InlineAlignmentError:
+                # Repair through the official provider/cache path, never use a
+                # corrupt cached response just because its MD5 matched.
+                paragraph.translation = None
         self.streaming('')
         self.streaming(_('Translating...'))
         text = self.glossary.replace(paragraph.original)
@@ -179,6 +192,8 @@ class Translation:
                 temp = ''.join([char for char in translation])
             translation = temp
         translation = self.glossary.restore(translation)
+        if self.strict_inline:
+            validate_inline_translation(paragraph.original, translation, self.translator.placeholder)
         paragraph.translation = translation.strip()
         # Apply aligment checking and processing.
         if self.translator.merge_enabled:
@@ -236,6 +251,8 @@ class Translation:
             raise Exception(_('Translation failed.'))
         consuming = round((time.time() - start_time) / 60, 2)
         self.log(_('Time consuming: {} minutes').format(consuming))
+        if self.strict_inline and hasattr(self.translator, 'get_session_usage'):
+            self.log('Provider token usage: ' + json.dumps(self.translator.get_session_usage(), sort_keys=True))
         self.log(_('Translation completed.'))
         self.progress(1, _('Translation completed.'))
 
