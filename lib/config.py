@@ -27,7 +27,7 @@ defaults: dict[str, Any] = {
     'show_notification': True,
     'translation_position': None,
     'vertical_gap': 0.0,
-    # Opt-in only-mode policy; None keeps existing rendering byte-compatible.
+    # V2 is the only-mode default. Explicit False opts out; bilingual is separate.
     'only_typography': {
         'line_height': 1.7, 'paragraph_gap': 0.75, 'text_align': 'start',
         'preserve_inline': True, 'auto_roles': True,

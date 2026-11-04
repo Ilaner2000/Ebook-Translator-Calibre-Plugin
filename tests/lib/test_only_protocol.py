@@ -16,6 +16,29 @@ from ...lib.conversion import translation_cache_identity
 
 
 class TestOnlyProtocol(unittest.TestCase):
+    def test_shared_cache_normalizes_whitespace_across_semantic_boundaries(self):
+        root = etree.fromstring(b'<div><p>Some <em> text </em> next</p></div>')
+        handler = ElementHandler(Base.placeholder, Base.separator, 'below')
+        handler.set_only_policy(None); handler.inline_cache_to_plain = True
+        handler.load_remove_rules(); handler.load_reserve_rules()
+        handler.prepare_original([PageElement(root[0])])
+        paragraph = SimpleNamespace(original='Some ⟦ET0O⟧ text ⟦ET0C⟧ next', translation='ONE ⟦ET0O⟧ TWO ⟦ET0C⟧ THREE')
+        handler.add_translations([paragraph])
+        self.assertEqual(2, len(root))
+        self.assertIn('ONE', ''.join(root[1].itertext()))
+        self.assertIn('TWO', ''.join(root[1].itertext()))
+
+    def test_paired_partial_cache_fails_before_even_successful_element_changes(self):
+        root = etree.fromstring(b'<div><p>First</p><p>Missing</p></div>')
+        handler = ElementHandler(Base.placeholder, Base.separator, 'below')
+        handler.set_only_policy(None); handler.inline_cache_to_plain = True
+        handler.load_remove_rules(); handler.load_reserve_rules()
+        handler.prepare_original([PageElement(x) for x in root]); before = etree.tostring(root)
+        paragraphs = [SimpleNamespace(original='First', translation='第一')]
+        with self.assertRaisesRegex(InlineAlignmentError, 'missing bilingual target at element 1'):
+            handler.add_translations(paragraphs)
+        self.assertEqual(before, etree.tostring(root))
+
     @patch('calibre_plugins.ebook_translator.engines.base.request')
     def test_real_custom_translate_sends_protocol_without_mutating_request(self, network):
         class Engine(CustomTranslate):

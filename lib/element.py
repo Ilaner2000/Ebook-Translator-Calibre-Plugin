@@ -817,7 +817,7 @@ class ElementHandler:
                 # Paired output's second, cache-only pass uses the very same
                 # V2 responses but retains the legacy bilingual DOM renderer.
                 from .only_mode import TOKEN
-                original = TOKEN.sub('', original)
+                original = trim(TOKEN.sub('', original))
                 if translated is not None:
                     translated = TOKEN.sub('', translated)
             translations[original] = translated
@@ -846,6 +846,15 @@ class ElementHandler:
                         validate_inline_translation(original, translations.get(original), self.placeholder)
                     except InlineAlignmentError as err:
                         raise InlineAlignmentError('V2 output blocked; extraction/cache mismatch at element %s' % eid) from err
+        if getattr(self, 'inline_cache_to_plain', False):
+            # Prove every required bilingual element has a target BEFORE any
+            # source mutation; token/link checks alone cannot detect omissions.
+            for eid, element in self.elements.items():
+                if element.ignored:
+                    continue
+                target = translations.get(element.get_content())
+                if not isinstance(target, str) or not target.strip():
+                    raise InlineAlignmentError('V2 paired output blocked; missing bilingual target at element %s' % eid)
         for eid, element in self.elements.copy().items():
             if element.ignored:
                 element.add_translation()

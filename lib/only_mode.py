@@ -1,9 +1,9 @@
-"""Opt-in, fail-closed Chinese-only rendering policies.
+"""Fail-closed Chinese-only rendering policies (V2 by default in the factory).
 
 Paired markers identify semantic runs, never source character offsets.  The
 translator must return each marker once with the original nesting; malformed
 output raises before the source element is removed.  Existing rendering is
-unchanged when no policy is configured.
+unchanged when a handler explicitly disables its policy.
 """
 from dataclasses import dataclass
 from collections import Counter
