@@ -869,6 +869,10 @@ class ElementHandler:
         self.degraded_originals = {}
         for paragraph in paragraphs:
             original, translated = paragraph.original, paragraph.translation
+            if translated and ((self.position == 'only' and getattr(self, 'only_policy', None) and self.only_policy.preserve_inline)
+                               or getattr(self, 'inline_cache_to_plain', False)):
+                from .translation_quality import normalize_translation
+                translated = normalize_translation(original, translated)
             if getattr(self, 'inline_cache_to_plain', False):
                 # Paired output's second, cache-only pass uses the very same
                 # V2 responses but retains the legacy bilingual DOM renderer.

@@ -104,6 +104,7 @@ def convert_book(
     """Process ebooks that Calibre supported."""
     policy = getattr(element_handler, 'only_policy', None)
     translation.strict_inline = bool(element_handler.position == 'only' and policy and policy.preserve_inline)
+    translation.quality_gate = bool(translation.strict_inline or getattr(element_handler, 'inline_cache_to_plain', False))
     translation.translator.inline_protocol = translation.strict_inline
     plumber = Plumber(
         input_path, output_path, log=log, report_progress=notification)

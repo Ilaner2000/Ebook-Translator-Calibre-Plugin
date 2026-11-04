@@ -15,6 +15,7 @@ from .config import get_config
 from .exception import TranslationFailed, TranslationCanceled
 from .handler import Handler
 from .only_mode import InlineAlignmentError, TOKEN, validate_inline_translation
+from .translation_quality import normalize_translation
 
 
 load_translations()  # type: ignore
@@ -96,6 +97,10 @@ class Translation:
         self.progress_bar = ProgressBar()
         self.abort_count = 0
         self.strict_inline = False
+        self.quality_gate = False
+
+    def quality_enabled(self):
+        return self.strict_inline or self.quality_gate
 
     def set_fresh(self, fresh):
         self.fresh = fresh
@@ -131,7 +136,7 @@ class Translation:
         * https://ai.youdao.com/DOCSIRMA/html/trans/api/wbfy/index.html
         * https://api.fanyi.baidu.com/doc/21
         """
-        if self.strict_inline:
+        if self.quality_enabled():
             return self._translate_inline_text(row, text)
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
@@ -182,6 +187,7 @@ class Translation:
                 target = self.translator.translate(text)
                 if isinstance(target, GeneratorType):
                     target = ''.join(target)
+                target = normalize_translation(text, target)
                 validate_inline_translation(text, target, self.translator.placeholder)
                 self.abort_count = 0
                 return InlineResult(target)
@@ -206,6 +212,7 @@ class Translation:
                 target = self.translator.translate(plain)
                 if isinstance(target, GeneratorType):
                     target = ''.join(target)
+                target = normalize_translation(text, target)
                 validate_inline_translation(text, target, self.translator.placeholder, degraded=True)
                 self.abort_count = 0
                 return InlineResult(target, degraded=True)
@@ -220,15 +227,19 @@ class Translation:
         raise TranslationFailed('V2 paragraph and available legacy fallback failed: %s' % last_error)
 
     def translate_paragraph(self, paragraph):
+        paragraph.memory_normalized = False
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         if paragraph.translation and not self.fresh:
             try:
-                if self.strict_inline:
-                    validate_inline_translation(paragraph.original, paragraph.translation, self.translator.placeholder,
+                if self.quality_enabled():
+                    normalized = normalize_translation(paragraph.original, paragraph.translation)
+                    validate_inline_translation(paragraph.original, normalized, self.translator.placeholder,
                                                 degraded=getattr(paragraph, 'degraded', False) is True)
+                    paragraph.memory_normalized = normalized != paragraph.translation
+                    paragraph.translation = normalized
                 paragraph.is_cache = True
-                if self.strict_inline:
+                if self.quality_enabled():
                     self.abort_count = 0
                 return
             except InlineAlignmentError:
@@ -257,7 +268,8 @@ class Translation:
                 temp = ''.join([char for char in translation])
             translation = temp
         translation = self.glossary.restore(translation)
-        if self.strict_inline:
+        if self.quality_enabled():
+            translation = normalize_translation(paragraph.original, translation)
             validate_inline_translation(paragraph.original, translation, self.translator.placeholder, degraded=degraded)
             paragraph.degraded = degraded
             paragraph.degrade_reason = 'inline_protocol_exhausted' if degraded else None
@@ -275,7 +287,10 @@ class Translation:
                 self.progress_bar.count, self.progress_bar.total))
 
         self.streaming(paragraph)
-        self.callback(paragraph)
+        # A decoded warm result is a render-only view. Its native target and
+        # hash-bound degraded metadata must remain byte/value-identical.
+        if not (paragraph.is_cache and getattr(paragraph, 'memory_normalized', False)):
+            self.callback(paragraph)
 
         row = paragraph.row
         original = paragraph.original.strip()
