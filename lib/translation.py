@@ -17,7 +17,7 @@ from .exception import (
     TranslationFailed, TranslationCanceled, ParagraphProtocolFailed)
 from .handler import Handler
 from .only_mode import InlineAlignmentError, TOKEN, validate_inline_translation
-from .translation_quality import normalize_translation
+from .translation_quality import normalize_translation, TranslationQualityError
 
 
 load_translations()  # type: ignore
@@ -236,7 +236,12 @@ class Translation:
                 target = normalize_translation(text, target)
                 validate_inline_translation(text, target, self.translator.placeholder, degraded=True)
                 self.abort_count = 0
-                return InlineResult(target, degraded=True, reason=reason)
+                # Without ET formatting the third attempt is an ordinary retry:
+                # stripping ET changed no input, so do not inflate degradation.
+                degraded = bool(TOKEN.search(text))
+                return InlineResult(
+                    target, degraded=degraded,
+                    reason=reason if degraded else None)
             except TranslationCanceled:
                 raise
             except Exception as err:
@@ -245,7 +250,9 @@ class Translation:
                     raise TranslationCanceled(_('Translation canceled.'))
         # Validation failure is terminal for this ROW, not a provider outage.
         # Never let ten malformed rows cancel the remaining book queue.
-        protocol_failed = isinstance(last_error, InlineAlignmentError)
+        protocol_failed = (
+            isinstance(last_error, InlineAlignmentError)
+            and not isinstance(last_error, TranslationQualityError))
         if protocol_failed:
             reason = ('placeholder_unrecoverable' if has_reserves
                       else 'inline_protocol_exhausted')

@@ -2,7 +2,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-from ...lib.exception import ParagraphProtocolFailed, TranslationCanceled
+from ...lib.exception import (
+    ParagraphProtocolFailed, TranslationCanceled, TranslationFailed)
 from . import test_inline_fallback as fixtures
 
 
@@ -40,7 +41,7 @@ class TestBoundedPlaceholderRetry(unittest.TestCase):
         self.assertEqual('譯文{{id_00000}}', p.translation)
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
-    def test_reserve_only_degraded_flag_survives_native_cache(self, _sleep):
+    def test_reserve_only_retry_is_not_counted_as_degradation(self, _sleep):
         from .test_inline_fallback import TestDegradedNativeCache
         fixture = TestDegradedNativeCache(); fixture.setUp()
         try:
@@ -50,8 +51,9 @@ class TestBoundedPlaceholderRetry(unittest.TestCase):
             worker, engine = self.worker(['缺圖片', '缺圖片', '保留{{id_00000}}'])
             worker.translate_paragraph(p);fixture.cache.update_paragraph(p)
             restored = fixture.cache.paragraph(7)
-            self.assertTrue(restored.degraded)
-            self.assertEqual('placeholder_exhausted', restored.degrade_reason)
+            self.assertFalse(restored.degraded)
+            self.assertIsNone(restored.degrade_reason)
+            self.assertIsNone(fixture.cache.get_info('only_v2_degraded:7'))
             worker.translate_paragraph(restored)
             self.assertTrue(restored.is_cache)
             self.assertEqual(3, engine.translate.call_count)
@@ -102,3 +104,16 @@ class TestBoundedPlaceholderRetry(unittest.TestCase):
         self.assertIsNone(p.failure_reason)
         self.assertTrue(p.is_cache)
         engine.translate.assert_not_called()
+
+    @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
+    def test_quality_storm_stops_before_eleventh_row(self, _sleep):
+        for bad in ('', '<0x80>', '失控' * 100):
+            with self.subTest(bad=bad[:10]):
+                worker,engine=self.worker([bad] * 30)
+                for count in range(1,11):
+                    with self.assertRaises(TranslationFailed):
+                        worker.translate_paragraph(self.paragraph('text{{id_00000}}'))
+                    self.assertEqual(count,worker.abort_count)
+                with self.assertRaises(TranslationCanceled):
+                    worker.translate_paragraph(self.paragraph('later{{id_00000}}'))
+                self.assertEqual(30,engine.translate.call_count)
