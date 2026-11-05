@@ -40,6 +40,7 @@ class Paragraph:
         self.aligned = True
         self.degraded = False
         self.degrade_reason = None
+        self.failure_reason = None
 
     def get_attributes(self) -> dict:
         if self.attributes:
@@ -308,7 +309,9 @@ class TranslationCache:
                 info = json.loads(raw)
                 from .only_mode import TOKEN
                 if (isinstance(info, dict) and info.get('version') == 1
-                        and TOKEN.search(paragraph.original)
+                        and (TOKEN.search(paragraph.original) or (
+                            info.get('reason') == 'placeholder_exhausted'
+                            and re.search(r'\{\{id_\d+\}\}', paragraph.original)))
                         and info.get('source_md5') == paragraph.md5
                         and info.get('translation_sha256') == hashlib.sha256(paragraph.translation.encode('utf-8')).hexdigest()):
                     paragraph.degraded = True

@@ -156,7 +156,8 @@ class TestOnlyProtocol(unittest.TestCase):
         self.assertFalse(paragraph.is_cache)
 
     def test_invalid_cached_translation_uses_official_engine(self):
-        engine = Mock(placeholder=Base.placeholder, merge_enabled=False)
+        engine = Mock(placeholder=Base.placeholder, merge_enabled=False,
+                      request_attempt=3)
         engine.translate.return_value = '⟦ET0O⟧譯文⟦ET0C⟧'
         worker = Translation(engine, Glossary(Base.placeholder)); worker.strict_inline = True
         paragraph = SimpleNamespace(row=1, original='⟦ET0O⟧text⟦ET0C⟧', translation='lost tokens', error=None)

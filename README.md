@@ -10,6 +10,8 @@ A Calibre plugin to translate ebook into a specified language.
 
 Local fork 2.4.6: in Translation Variants preset A, **主書保留** selects translation-only (default) or bilingual as the main EPUB; the source and alternate version stay in Data. Presets B and C are unchanged.
 
+Local fork 2.4.7: V2 paragraphs use at most three engine attempts including legacy fallback; unrecoverable protected text is listed at job end, stays untranslated in cache, and blocks EPUB output while other rows continue.
+
 __Plugin Homepage__: [https://translator.bookfere.com](https://translator.bookfere.com)
 
 ![Translation illustration](images/sample-en.png)

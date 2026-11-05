@@ -64,13 +64,13 @@ class TestTranslationQuality(unittest.TestCase):
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_markerless_exhaustion_counts_one_terminal_failure(self, sleep):
-        worker, engine = self.worker(['🟨 ' * 819] * 4)
+        worker, engine = self.worker(['🟨 ' * 819] * 3)
         with self.assertRaises(TranslationFailed): worker.translate_paragraph(self.paragraph())
-        self.assertEqual(4, engine.translate.call_count); self.assertEqual(1, worker.abort_count)
+        self.assertEqual(3, engine.translate.call_count); self.assertEqual(0, worker.abort_count)
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_fallback_uses_same_quality_gate_and_persists_decoded_hash(self, sleep):
-        worker, engine = self.worker(['bad'] * 4 + ['<0xE9><0x8C><0xAE>'])
+        worker, engine = self.worker(['bad'] * 2 + ['<0xE9><0x8C><0xAE>'])
         p = self.paragraph('⟦ET0O⟧word⟦ET0C⟧'); worker.translate_paragraph(p)
         self.assertEqual('錮', p.translation); self.assertTrue(p.degraded)
         with tempfile.TemporaryDirectory() as td, patch.object(TranslationCache, 'dir_path', td), \
@@ -86,10 +86,10 @@ class TestTranslationQuality(unittest.TestCase):
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_fallback_invalid_bytes_cannot_publish(self, sleep):
-        worker, engine = self.worker(['bad'] * 4 + ['<0x80>'])
+        worker, engine = self.worker(['bad'] * 2 + ['<0x80>'])
         with self.assertRaises(TranslationFailed):
             worker.translate_paragraph(self.paragraph('⟦ET0O⟧word⟦ET0C⟧'))
-        self.assertEqual(5, engine.translate.call_count); self.assertEqual(1, worker.abort_count)
+        self.assertEqual(3, engine.translate.call_count); self.assertEqual(0, worker.abort_count)
 
     def test_warm_decoded_only_and_bilingual_views_do_not_write_callback(self):
         for strict in [True, False]:

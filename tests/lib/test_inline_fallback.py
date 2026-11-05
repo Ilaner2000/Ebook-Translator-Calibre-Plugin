@@ -39,9 +39,9 @@ class TestInlineFallback(unittest.TestCase):
         for source in shapes:
             with self.subTest(source=source):
                 target = '繁中降級譯文' + ('{{id_00000}}' if '{{id_' in source else '')
-                worker, engine = self.worker(['bad'] * 4 + [target])
+                worker, engine = self.worker(['bad'] * 2 + [target])
                 p = self.paragraph(source); worker.translate_paragraph(p)
-                self.assertEqual(5, engine.translate.call_count)
+                self.assertEqual(3, engine.translate.call_count)
                 self.assertEqual(trim(TOKEN.sub('', source)), engine.translate.call_args.args[0])
                 self.assertTrue(p.degraded); self.assertEqual(target, p.translation)
                 self.assertEqual(0, worker.abort_count); self.assertFalse(p.is_cache)
@@ -50,48 +50,48 @@ class TestInlineFallback(unittest.TestCase):
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_only_terminal_paragraph_failure_counts_and_cache_success_resets(self, sleep):
         source = 'A ⟦ET0O⟧word⟦ET0C⟧ {{id_00000}}'
-        worker, engine = self.worker(['bad'] * 5)
+        worker, engine = self.worker(['bad'] * 3)
         p = self.paragraph(source)
         with self.assertRaises(TranslationFailed):worker.translate_paragraph(p)
-        self.assertEqual(5, engine.translate.call_count); self.assertEqual(1, worker.abort_count)
+        self.assertEqual(3, engine.translate.call_count); self.assertEqual(0, worker.abort_count)
         cached = self.paragraph(source); cached.translation = source
         worker.translate_paragraph(cached)
-        self.assertEqual(5, engine.translate.call_count); self.assertEqual(0, worker.abort_count)
+        self.assertEqual(3, engine.translate.call_count); self.assertEqual(0, worker.abort_count)
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_many_successful_degradations_cannot_trip_abort(self, sleep):
-        worker, engine = self.worker((['bad'] * 4 + ['譯文']) * 12)
+        worker, engine = self.worker((['bad'] * 2 + ['譯文']) * 12)
         for _ in range(12):
             p = self.paragraph('⟦ET0O⟧word⟦ET0C⟧'); worker.translate_paragraph(p)
             self.assertTrue(p.degraded); self.assertEqual(0, worker.abort_count)
-        self.assertEqual(60, engine.translate.call_count)
+        self.assertEqual(36, engine.translate.call_count)
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_ten_terminal_rows_stop_before_requesting_eleventh(self, sleep):
-        worker, engine = self.worker([''] * 50)
+        worker, engine = self.worker([RuntimeError('offline')] * 30)
         for count in range(1, 11):
             with self.assertRaises(TranslationFailed):
                 worker.translate_paragraph(self.paragraph('⟦ET0O⟧word⟦ET0C⟧'))
             self.assertEqual(count, worker.abort_count)
         with self.assertRaises(TranslationCanceled):
             worker.translate_paragraph(self.paragraph('⟦ET0O⟧next⟦ET0C⟧'))
-        self.assertEqual(50, engine.translate.call_count)
+        self.assertEqual(30, engine.translate.call_count)
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_fallback_cannot_drop_reserve_or_invent_markers(self, sleep):
         source = '⟦ET0O⟧word⟦ET0C⟧ {{id_00000}}'
         for bad in ('譯文', '譯文{{id_99999}}', '⟦ET0O⟧譯文⟦ET0C⟧{{id_00000}}'):
-            worker, engine = self.worker(['bad'] * 4 + [bad])
+            worker, engine = self.worker(['bad'] * 2 + [bad])
             with self.subTest(bad=bad), self.assertRaises(TranslationFailed):
                 worker.translate_paragraph(self.paragraph(source))
-            self.assertEqual(1, worker.abort_count)
+            self.assertEqual(0, worker.abort_count)
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_cancel_and_fatal_provider_error_do_not_degrade(self, sleep):
-        worker, engine = self.worker(['bad'] * 5)
-        worker.set_cancel_request(lambda: engine.translate.call_count >= 4)
+        worker, engine = self.worker(['bad'] * 3)
+        worker.set_cancel_request(lambda: engine.translate.call_count >= 2)
         with self.assertRaises(TranslationCanceled):worker.translate_paragraph(self.paragraph('⟦ET0O⟧word⟦ET0C⟧'))
-        self.assertEqual(4, engine.translate.call_count)
+        self.assertEqual(2, engine.translate.call_count)
         worker, engine = self.worker([RuntimeError('fatal')]); engine.match_error.return_value = True
         with self.assertRaises(TranslationCanceled):worker.translate_paragraph(self.paragraph('⟦ET0O⟧word⟦ET0C⟧'))
         self.assertEqual(1, engine.translate.call_count)

@@ -1,6 +1,7 @@
 import re
 import time
 import json
+from collections import Counter
 from types import GeneratorType
 
 from calibre.utils.localization import _  # type: ignore
@@ -12,7 +13,8 @@ from ..engines.custom import CustomTranslate
 
 from .utils import log, sep, trim, dummy, traceback_error
 from .config import get_config
-from .exception import TranslationFailed, TranslationCanceled
+from .exception import (
+    TranslationFailed, TranslationCanceled, ParagraphProtocolFailed)
 from .handler import Handler
 from .only_mode import InlineAlignmentError, TOKEN, validate_inline_translation
 from .translation_quality import normalize_translation
@@ -74,13 +76,17 @@ class ProgressBar:
 
 
 class InlineResult(str):
-    def __new__(cls, value, degraded=False):
+    def __new__(cls, value, degraded=False, reason=None):
         instance = str.__new__(cls, value)
         instance.degraded = degraded
+        instance.degrade_reason = reason
         return instance
 
 
 class Translation:
+    # Total V2 provider budget, including the one available legacy fallback.
+    # An engine's larger request_attempt must never expand this bound.
+    inline_request_limit = 3
     def __init__(self, translator, glossary):
         self.translator = translator
         self.glossary = glossary
@@ -173,21 +179,34 @@ class Translation:
             return self.translate_text(row, text, retry, interval)
 
     def _translate_inline_text(self, row, text):
-        """Retry V2, then one declared legacy attempt, counting failed ROWS.
+        """At most three provider attempts, including one legacy fallback.
 
         The engine/config/cache identity is unchanged. No shared translator
         flags are toggled during concurrent requests.
         """
         last_error = None
-        attempt = 0
-        while True:
+        reserve = re.compile(self.translator.placeholder[1].format(r'\d+')) \
+            if self.translator.placeholder else None
+        has_reserves = bool(reserve and reserve.search(text))
+        can_degrade = bool(TOKEN.search(text) or has_reserves)
+        strict_limit = min(
+            self.inline_request_limit - int(can_degrade),
+            max(1, int(self.translator.request_attempt) + 1))
+        placeholder_failed = False
+        requests = 0
+        for attempt in range(strict_limit):
             if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
                 raise TranslationCanceled(_('Translation canceled.'))
             try:
+                requests += 1
                 target = self.translator.translate(text)
                 if isinstance(target, GeneratorType):
                     target = ''.join(target)
                 target = normalize_translation(text, target)
+                if has_reserves:
+                    placeholder_failed = placeholder_failed or (
+                        Counter(m.group() for m in reserve.finditer(text)) !=
+                        Counter(m.group() for m in reserve.finditer(target)))
                 validate_inline_translation(text, target, self.translator.placeholder)
                 self.abort_count = 0
                 return InlineResult(target)
@@ -197,34 +216,52 @@ class Translation:
                 last_error = err
                 if self.cancel_request() or self.translator.match_error(str(err)):
                     raise TranslationCanceled(_('Translation canceled.'))
-                if attempt >= self.translator.request_attempt:
+                if attempt + 1 >= strict_limit:
                     break
-                attempt += 1
-                delay = attempt * 5
+                delay = (attempt + 1) * 5
                 self.log('Row: %s\nOriginal: %s\nStatus: Failed %s times / Sleeping for %s seconds\nError: %s' %
-                         (row, text[:200], attempt, delay, str(err)), True)
+                         (row, text[:200], attempt + 1, delay, str(err)), True)
                 time.sleep(delay)
-        if TOKEN.search(text):
+        reason = ('placeholder_exhausted' if has_reserves
+                  else 'inline_protocol_exhausted')
+        if can_degrade:
             if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
                 raise TranslationCanceled(_('Translation canceled.'))
             try:
                 plain = trim(TOKEN.sub('', text))
+                requests += 1
                 target = self.translator.translate(plain)
                 if isinstance(target, GeneratorType):
                     target = ''.join(target)
                 target = normalize_translation(text, target)
                 validate_inline_translation(text, target, self.translator.placeholder, degraded=True)
                 self.abort_count = 0
-                return InlineResult(target, degraded=True)
+                return InlineResult(target, degraded=True, reason=reason)
             except TranslationCanceled:
                 raise
             except Exception as err:
                 last_error = err
                 if self.cancel_request() or self.translator.match_error(str(err)):
                     raise TranslationCanceled(_('Translation canceled.'))
-        # All attempts including fallback failed: one terminal paragraph error.
-        self.abort_count += 1
-        raise TranslationFailed('V2 paragraph and available legacy fallback failed: %s' % last_error)
+        # Validation failure is terminal for this ROW, not a provider outage.
+        # Never let ten malformed rows cancel the remaining book queue.
+        protocol_failed = isinstance(last_error, InlineAlignmentError)
+        if protocol_failed:
+            reason = ('placeholder_unrecoverable' if has_reserves
+                      else 'inline_protocol_exhausted')
+        else:
+            self.abort_count += 1
+        self.log('V2 terminal failure: ' + json.dumps({
+            'row': row, 'reason': reason, 'requests': requests,
+            'request_limit': self.inline_request_limit,
+            'reserve_loss_seen': placeholder_failed}), True)
+        message = (
+            'V2 paragraph exhausted (%s; %s/%s requests); '
+            'available legacy fallback failed: %s' % (
+                reason, requests, self.inline_request_limit, last_error))
+        if protocol_failed:
+            raise ParagraphProtocolFailed(message, reason)
+        raise TranslationFailed(message)
 
     def translate_paragraph(self, paragraph):
         if self.cancel_request():
@@ -253,8 +290,15 @@ class Translation:
         self.streaming('')
         self.streaming(_('Translating...'))
         text = self.glossary.replace(paragraph.original)
-        translation = self.translate_text(paragraph.row, text)
+        paragraph.failure_reason = None
+        try:
+            translation = self.translate_text(paragraph.row, text)
+        except ParagraphProtocolFailed as error:
+            paragraph.failure_reason = error.reason
+            paragraph.translation = None
+            raise
         degraded = getattr(translation, 'degraded', False) is True
+        degrade_reason = getattr(translation, 'degrade_reason', None)
         # Process streaming text
         if isinstance(translation, GeneratorType):
             if self.total == 1:
@@ -276,7 +320,8 @@ class Translation:
             translation = normalize_translation(paragraph.original, translation)
             validate_inline_translation(paragraph.original, translation, self.translator.placeholder, degraded=degraded)
             paragraph.degraded = degraded
-            paragraph.degrade_reason = 'inline_protocol_exhausted' if degraded else None
+            paragraph.degrade_reason = (
+                degrade_reason or 'inline_protocol_exhausted') if degraded else None
         paragraph.translation = translation.strip()
         # Apply aligment checking and processing.
         if self.translator.merge_enabled:
@@ -349,10 +394,22 @@ class Translation:
             degraded_rows = [{'id': p.id, 'page': p.page, 'source_md5': p.md5}
                              for p in paragraphs if getattr(p, 'degraded', False) is True and p.error is None]
             self.log('degraded summary: ' + json.dumps({'count': len(degraded_rows), 'paragraphs': degraded_rows}, ensure_ascii=False))
+        unrecoverable = [{
+            'id': p.id, 'page': p.page,
+            'reason': getattr(p, 'failure_reason', None),
+            'source_preview': p.original[:60],
+        } for p in paragraphs if getattr(p, 'failure_reason', None)]
+        if unrecoverable:
+            self.log('unrecoverable summary: ' + json.dumps({
+                'count': len(unrecoverable), 'paragraphs': unrecoverable},
+                ensure_ascii=False), True)
         if self.strict_inline and hasattr(self.translator, 'get_session_usage'):
             self.log('Provider token usage: ' + json.dumps(self.translator.get_session_usage(), sort_keys=True))
-        self.log(_('Translation completed.'))
-        self.progress(1, _('Translation completed.'))
+        message = (_('Translation finished with unrecoverable paragraphs; '
+                     'output remains blocked.') if unrecoverable
+                   else _('Translation completed.'))
+        self.log(message)
+        self.progress(1, message)
 
 
 def get_engine_class(engine_name=None):
