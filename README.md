@@ -12,6 +12,8 @@ Local fork 2.4.6: in Translation Variants preset A, **主書保留** selects tra
 
 Local fork 2.4.7: V2 paragraphs use at most three engine attempts including legacy fallback; unrecoverable protected text is listed at job end, stays untranslated in cache, and blocks EPUB output while other rows continue.
 
+Local fork 2.4.8: the optional **不可恢復段落保留原文並照常輸出** setting (off by default) keeps failed protocol paragraphs and their images as source text, once in bilingual output, while listing them in the job log and variants manifest; missing cache targets remain empty. With the option off, V2 still blocks incomplete output.
+
 __Plugin Homepage__: [https://translator.bookfere.com](https://translator.bookfere.com)
 
 ![Translation illustration](images/sample-en.png)

@@ -134,6 +134,8 @@ class TestConvertVariantsItem(unittest.TestCase):
         translator.name = 'Test Engine'
         translator.get_iso639_target_code.return_value = 'zh'
         translation = mock_get_translation.return_value
+        translation.keep_unrecoverable_source = False
+        translation.retained_source_manifest.return_value = []
         cache = mock_get_cache.return_value
         cache.is_persistence.return_value = True
         translation_handler = Mock()

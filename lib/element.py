@@ -874,6 +874,10 @@ class ElementHandler:
     def prepare_translation(self, paragraphs):
         translations = {}
         self.degraded_originals = {}
+        self.kept_source_originals = set()
+        self.kept_source_paragraphs = set()
+        self.kept_source_rows = {}
+        self.row_targets = {}
         for paragraph in paragraphs:
             original, translated = paragraph.original, paragraph.translation
             if translated and ((self.position == 'only' and getattr(self, 'only_policy', None) and self.only_policy.preserve_inline)
@@ -888,15 +892,36 @@ class ElementHandler:
                 if translated is not None:
                     translated = TOKEN.sub('', translated)
             translations[original] = translated
+            identity = (getattr(paragraph, 'id', None),
+                        getattr(paragraph, 'page', None), original)
+            self.row_targets[identity] = translated
+            if (getattr(self, 'keep_unrecoverable_source', False) is True
+                    and getattr(paragraph, 'keep_source', False) is True
+                    and translated is None
+                    and getattr(paragraph, 'failure_reason', None) in (
+                        'placeholder_unrecoverable', 'inline_protocol_exhausted')):
+                self.kept_source_originals.add(original)
+                self.kept_source_paragraphs.add(id(paragraph))
+                self.kept_source_rows[identity] = paragraph.raw
             self.degraded_originals[original] = getattr(paragraph, 'degraded', False) is True
         return translations
 
     def add_translations(self, paragraphs):
         translations = self.prepare_translation(paragraphs)
+        self.kept_source_nodes = set()
+        kept_rows = getattr(self, 'kept_source_rows', {})
+        for element in (self.elements.values() if kept_rows else []):
+            identity = (getattr(element, 'source_oid', None),
+                        element.page_id, element.get_content())
+            raw = kept_rows.get(identity)
+            if raw is not None and raw == element.get_raw():
+                self.kept_source_nodes.add(element.element)
         if self.position == 'only' and getattr(self, 'only_policy', None) and self.only_policy.preserve_inline:
             from .only_mode import validate_inline_translation
             failures = []
             for paragraph in paragraphs:
+                if id(paragraph) in self.kept_source_paragraphs:
+                    continue
                 try:
                     if paragraph.error:
                         raise InlineAlignmentError('paragraph has translation error')
@@ -912,8 +937,10 @@ class ElementHandler:
             for eid, element in self.elements.items():
                 if not element.ignored:
                     original = element.get_content()
+                    if self._keeps_source(element):
+                        continue
                     try:
-                        validate_inline_translation(original, translations.get(original), self.placeholder,
+                        validate_inline_translation(original, self._element_target(element, translations), self.placeholder,
                                                     degraded=self.degraded_originals.get(original, False))
                     except InlineAlignmentError as err:
                         raise InlineAlignmentError('V2 output blocked; extraction/cache mismatch at element %s' % eid) from err
@@ -923,7 +950,9 @@ class ElementHandler:
             for eid, element in self.elements.items():
                 if element.ignored:
                     continue
-                target = translations.get(element.get_content())
+                target = self._element_target(element, translations)
+                if self._keeps_source(element):
+                    continue
                 if not isinstance(target, str) or not target.strip():
                     raise InlineAlignmentError('V2 paired output blocked; missing bilingual target at element %s' % eid)
         for eid, element in self.elements.copy().items():
@@ -931,13 +960,38 @@ class ElementHandler:
                 element.add_translation()
                 continue
             original = element.get_content()
-            translation = translations.get(original)
+            if self._keeps_source(element):
+                # Leave the exact source node and images in place. In paired
+                # output this also means no duplicate translation paragraph.
+                self.elements.pop(eid)
+                continue
+            translation = self._element_target(element, translations)
             if translation is None:
                 element.add_translation()
                 continue
             element.degraded = getattr(self, 'degraded_originals', {}).get(original, False)
             element.add_translation(translation)
             self.elements.pop(eid)
+
+    def _keeps_source(self, element):
+        if getattr(self, 'keep_unrecoverable_source', False) is not True:
+            return False
+        node = element.element
+        if not hasattr(node, 'iterancestors'):
+            return False
+        return (node in self.kept_source_nodes or any(
+            parent in self.kept_source_nodes for parent in node.iterancestors()))
+
+    def _element_target(self, element, translations):
+        original = element.get_content()
+        if getattr(self, 'keep_unrecoverable_source', False) is True:
+            identity = (getattr(element, 'source_oid', None),
+                        element.page_id, original)
+            if identity in getattr(self, 'row_targets', {}):
+                return self.row_targets[identity]
+            if original in getattr(self, 'kept_source_originals', set()):
+                return None  # Never copy another identical-looking row's status.
+        return translations.get(original)
 
 
 class ElementHandlerMerge(ElementHandler):

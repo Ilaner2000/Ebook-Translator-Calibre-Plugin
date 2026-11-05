@@ -104,9 +104,26 @@ class Translation:
         self.abort_count = 0
         self.strict_inline = False
         self.quality_gate = False
+        self.keep_unrecoverable_source = False
+        # Per-job only: never turn source text into a successful cached target.
+        self.retained_sources = {}
 
     def quality_enabled(self):
         return self.strict_inline or self.quality_gate
+
+    def retained_source(self, paragraph):
+        if self.keep_unrecoverable_source is not True:
+            return False
+        record = self.retained_sources.get(paragraph.id)
+        return (self.keep_unrecoverable_source is True and record is not None
+                and record['source_md5'] == paragraph.md5
+                and record['original'] == paragraph.original
+                and paragraph.translation is None)
+
+    def retained_source_manifest(self):
+        return [{k:row[k] for k in (
+            'id', 'page', 'source_preview', 'reason')}
+            for _key,row in sorted(self.retained_sources.items())]
 
     def set_fresh(self, fresh):
         self.fresh = fresh
@@ -274,6 +291,14 @@ class Translation:
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         paragraph.failure_reason = None
+        paragraph.keep_source = False
+        if self.retained_source(paragraph):
+            paragraph.keep_source = True
+            paragraph.failure_reason = self.retained_sources[paragraph.id]['reason']
+            paragraph.is_cache = True
+            return
+        if self.keep_unrecoverable_source is True:
+            self.retained_sources.pop(paragraph.id, None)
         if paragraph.translation and not self.fresh:
             try:
                 if self.quality_enabled():
@@ -303,6 +328,15 @@ class Translation:
         except ParagraphProtocolFailed as error:
             paragraph.failure_reason = error.reason
             paragraph.translation = None
+            if self.keep_unrecoverable_source is True:
+                paragraph.keep_source = True
+                self.retained_sources[paragraph.id] = {
+                    'id': paragraph.id, 'page': paragraph.page,
+                    'source_md5': paragraph.md5,
+                    'original': paragraph.original,
+                    'source_preview': paragraph.original[:60],
+                    'reason': error.reason,
+                }
             raise
         degraded = getattr(translation, 'degraded', False) is True
         degrade_reason = getattr(translation, 'degrade_reason', None)
@@ -353,6 +387,11 @@ class Translation:
 
         row = paragraph.row
         original = paragraph.original.strip()
+        if getattr(paragraph, 'keep_source', False) is True:
+            self.log('Source retained (untranslated): ' + json.dumps({
+                'id': paragraph.id, 'page': paragraph.page,
+                'source_preview': paragraph.original[:60]}, ensure_ascii=False))
+            return
         if paragraph.error is None:
             if getattr(paragraph, 'degraded', False) is True:
                 self.log('degraded: ' + json.dumps({
@@ -410,11 +449,20 @@ class Translation:
             self.log('unrecoverable summary: ' + json.dumps({
                 'count': len(unrecoverable), 'paragraphs': unrecoverable},
                 ensure_ascii=False), True)
+        retained = self.retained_source_manifest()
+        if retained:
+            self.log('source retained summary: ' + json.dumps({
+                'count': len(retained), 'paragraphs': retained},
+                ensure_ascii=False))
         if self.strict_inline and hasattr(self.translator, 'get_session_usage'):
             self.log('Provider token usage: ' + json.dumps(self.translator.get_session_usage(), sort_keys=True))
+        blocked = any(getattr(p, 'failure_reason', None)
+                      and getattr(p, 'keep_source', False) is not True
+                      for p in paragraphs)
         message = (_('Translation finished with unrecoverable paragraphs; '
-                     'output remains blocked.') if unrecoverable
-                   else _('Translation completed.'))
+                     'output remains blocked.') if blocked else
+                   (_('Translation completed with source paragraphs retained.')
+                    if retained else _('Translation completed.')))
         self.log(message)
         self.progress(1, message)
 
@@ -463,6 +511,8 @@ def get_translation(translator, log=None):
     if config.get('glossary_enabled'):
         glossary.load_from_file(config.get('glossary_path'))
     translation = Translation(translator, glossary)
+    translation.keep_unrecoverable_source = config.get(
+        'v2_unrecoverable_keep_source', False) is True
     if get_config().get('log_translation'):
         translation.set_logging(log)
     return translation

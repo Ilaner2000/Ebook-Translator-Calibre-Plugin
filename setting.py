@@ -230,6 +230,16 @@ class TranslationSetting(QDialog):
             self.config.get('translation_variant_main', 'translation'))))
         main_layout.addWidget(variant_main, 1)
         variants_layout.addLayout(main_layout)
+        keep_source = QCheckBox(_(
+            '不可恢復段落保留原文並照常輸出'))
+        keep_source.setToolTip(_(
+            'V2 only: retain the original text and images. '
+            'Missing cache targets remain untranslated.'))
+        keep_source.setChecked(self.config.get(
+            'v2_unrecoverable_keep_source', False) is True)
+        keep_source.toggled.connect(lambda checked: self.config.update(
+            v2_unrecoverable_keep_source=checked))
+        variants_layout.addWidget(keep_source)
         variant_gap_layout = QHBoxLayout()
         variant_gap_layout.addWidget(QLabel(_('Bilingual Gap')))
         variant_gap = QDoubleSpinBox()

@@ -106,6 +106,9 @@ def convert_book(
     translation.strict_inline = bool(element_handler.position == 'only' and policy and policy.preserve_inline)
     translation.quality_gate = bool(translation.strict_inline or getattr(element_handler, 'inline_cache_to_plain', False))
     translation.translator.inline_protocol = translation.strict_inline
+    element_handler.keep_unrecoverable_source = (
+        getattr(translation, 'keep_unrecoverable_source', False) is True
+        and translation.quality_enabled())
     plumber = Plumber(
         input_path, output_path, log=log, report_progress=notification)
     _convert = plumber.output_plugin.convert
@@ -126,6 +129,13 @@ def convert_book(
         cache.save(original_group)
 
         paragraphs = cache.all_paragraphs()
+        if (element_handler.keep_unrecoverable_source
+                and getattr(cache, 'cache_only', False) is True
+                and translation.retained_sources):
+            present = {p.id for p in paragraphs}
+            retained = cache.get_paragraphs(list(translation.retained_sources))
+            paragraphs.extend(p for p in retained if p.id not in present
+                              and translation.retained_source(p))
         translation.handle(paragraphs)
         element_handler.add_translations(paragraphs)
 
@@ -389,6 +399,17 @@ def convert_variants_item(
         input_path, bilingual_output_path, translation, bilingual_handler,
         cache, get_debug_info(bilingual_output_path), encoding, notification)
     cache.done()
+    summary = {
+        'v2_unrecoverable_keep_source': (
+            getattr(translation, 'keep_unrecoverable_source', False) is True),
+        'kept_source_paragraphs': translation.retained_source_manifest(),
+    }
+    if summary['kept_source_paragraphs']:
+        # This output disclosure is required even when verbose translation
+        # logging was disabled; targets in the native cache are still NULL.
+        log.info('source retained output: ' + json.dumps(
+            summary, ensure_ascii=False))
+    return summary
 
 
 class ConversionWorker:
@@ -639,6 +660,9 @@ class ConversionWorker:
                 payload.get('main_variant', 'translation')
                 if payload['effective_storage'] == 'bundle_data'
                 else 'translation'),
+            'v2_unrecoverable_keep_source': payload.get(
+                'v2_unrecoverable_keep_source', False) is True,
+            'kept_source_paragraphs': payload.get('kept_source_paragraphs', []),
             'source_language': ebook.source_lang,
             'target_language': ebook.target_lang,
             'target_language_code': ebook.lang_code,
@@ -805,6 +829,13 @@ class ConversionWorker:
             return
 
         if isinstance(output_path, dict) and output_path.get('variants'):
+            result = getattr(job, 'result', None)
+            if isinstance(result, dict):
+                output_path = dict(output_path)
+                output_path['v2_unrecoverable_keep_source'] = result.get(
+                    'v2_unrecoverable_keep_source', False) is True
+                output_path['kept_source_paragraphs'] = result.get(
+                    'kept_source_paragraphs', [])
             try:
                 variant_output_path, ebook_title, created_count = \
                     self._store_variants(ebook, output_path)
