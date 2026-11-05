@@ -275,6 +275,7 @@ class TestConversionWorker(unittest.TestCase):
             'to_library': True,
             'translation_variant_storage': 'bundle_data',
             'translation_variant_gap': 1.0,
+            'translation_variant_main': 'bilingual',
         }
         self.worker.working_jobs = {}
         self.ebook.id = 7
@@ -300,6 +301,7 @@ class TestConversionWorker(unittest.TestCase):
         payload = self.worker.working_jobs[job][1]
         self.assertEqual('bundle_data', payload['requested_storage'])
         self.assertEqual('bundle_data', payload['effective_storage'])
+        self.assertEqual('bilingual', payload['main_variant'])
         mock_question.assert_called_once()
 
     @patch(module_name + '.temporary_path')
@@ -492,6 +494,7 @@ class TestConversionWorker(unittest.TestCase):
             self, mock_metadata, mock_add_extra, mock_manifest_file,
             mock_manifest):
         self.configure_variant_ebook()
+        self.worker.config['translation_variant_main'] = 'bilingual'
         mock_metadata.side_effect = [
             (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
         mock_manifest_file.return_value = '/manifest.json'
@@ -531,6 +534,7 @@ class TestConversionWorker(unittest.TestCase):
             self, mock_metadata, mock_add_extra, mock_manifest_file,
             mock_manifest):
         self.configure_variant_ebook()
+        self.worker.config['translation_variant_main'] = 'bilingual'
         mock_metadata.side_effect = [
             (Mock(), 'Chinese title'), (Mock(), 'Bilingual title')]
         mock_manifest_file.return_value = '/manifest.json'

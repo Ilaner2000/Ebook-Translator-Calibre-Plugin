@@ -508,6 +508,7 @@ class ConversionWorker:
             'bilingual_path': bilingual_path,
             'requested_storage': requested_storage,
             'effective_storage': effective_storage,
+            'main_variant': self._variant_main(),
             'run_id': run_id,
         })
         return job
@@ -546,13 +547,21 @@ class ConversionWorker:
         return (lang_code == 'zho' or lang_code.startswith('zh') or
                 'chinese' in target_lang or '中文' in target_lang)
 
-    def _variant_role_tags(self, ebook, storage, kind):
+    def _variant_main(self):
+        value = self.config.get('translation_variant_main', 'translation')
+        return value if value in ('translation', 'bilingual') else 'translation'
+
+    def _variant_role_tags(
+            self, ebook, storage, kind, main_variant='translation'):
         if not self._is_chinese_target(ebook):
             return []
         if kind == 'bilingual':
-            return ['雙語_']
+            return ['雙語_', '附中譯_'] if (
+                storage == 'bundle_data' and main_variant == 'bilingual'
+            ) else ['雙語_']
         tags = ['中譯_']
-        if storage in ('bundle_data', 'linked_pair'):
+        if storage == 'linked_pair' or (
+                storage == 'bundle_data' and main_variant == 'translation'):
             tags.append('附雙語_')
         return tags
 
@@ -626,6 +635,10 @@ class ConversionWorker:
             'derivative_book_ids': derivative_book_ids,
             'requested_storage': payload['requested_storage'],
             'effective_storage': payload['effective_storage'],
+            'main_variant': (
+                payload.get('main_variant', 'translation')
+                if payload['effective_storage'] == 'bundle_data'
+                else 'translation'),
             'source_language': ebook.source_lang,
             'target_language': ebook.target_lang,
             'target_language_code': ebook.lang_code,
@@ -648,15 +661,20 @@ class ConversionWorker:
         source_id = ebook.id
         source_uuid = self.api.field_for('uuid', source_id) or source_id
         storage = payload['effective_storage']
+        main_variant = payload.get('main_variant', self._variant_main())
+        if main_variant not in ('translation', 'bilingual'):
+            main_variant = 'translation'
+        # Freeze the effective role in the manifest as well as the main file.
+        payload = dict(payload, main_variant=main_variant)
         translation_role_tags = self._variant_role_tags(
-            ebook, storage, 'translation')
+            ebook, storage, 'translation', main_variant)
         bilingual_role_tags = self._variant_role_tags(
-            ebook, storage, 'bilingual')
+            ebook, storage, 'bilingual', main_variant)
         translation_metadata, translation_title = \
             self._prepare_variant_metadata(
                 payload['translation_path'], ebook, 'translation',
                 source_uuid, translation_role_tags)
-        bilingual_metadata, _bilingual_title = self._prepare_variant_metadata(
+        bilingual_metadata, bilingual_title = self._prepare_variant_metadata(
             payload['bilingual_path'], ebook, 'bilingual', source_uuid,
             bilingual_role_tags)
         namespace = '%s/translation-variants/%s' % (
@@ -667,26 +685,34 @@ class ConversionWorker:
         manifest_relpath = '%s/manifest.json' % namespace
 
         if storage == 'bundle_data':
+            other_variant = (
+                'translation' if main_variant == 'bilingual' else 'bilingual')
+            main_path = payload[main_variant + '_path']
+            other_relpath = '%s/%s.%s.epub' % (
+                namespace, other_variant, ebook.lang_code or 'target')
+            main_tags = (bilingual_role_tags if main_variant == 'bilingual'
+                         else translation_role_tags)
             original_identifiers = dict(
                 self.api.field_for('identifiers', source_id) or {})
             original_tags = list(
                 self.api.field_for('tags', source_id) or [])
             marked_identifiers = dict(original_identifiers)
             marked_identifiers['ebook-translator-variant'] = \
-                'translation:%s' % payload['run_id']
+                '%s:%s' % (main_variant, payload['run_id'])
             marked_tags = list(original_tags)
-            for tag in translation_role_tags:
+            for tag in main_tags:
                 if tag not in marked_tags:
                     marked_tags.append(tag)
             derivative_ids = {
-                'translation': source_id,
-                'bilingual': None,
+                'translation': (
+                    source_id if main_variant == 'translation' else None),
+                'bilingual': source_id if main_variant == 'bilingual' else None,
             }
             manifest_path = self._write_manifest(self._variant_manifest(
                 ebook, payload, source_uuid, derivative_ids))
             files = {
                 source_relpath: payload['source_path'],
-                bilingual_relpath: payload['bilingual_path'],
+                other_relpath: payload[other_variant + '_path'],
                 manifest_relpath: manifest_path,
             }
             try:
@@ -701,13 +727,13 @@ class ConversionWorker:
                 raise
             try:
                 added = self.api.add_format(
-                    source_id, 'EPUB', payload['translation_path'],
+                    source_id, 'EPUB', main_path,
                     replace=True, run_hooks=False)
                 if added is False:
                     raise RuntimeError(
-                        'Could not replace source EPUB with translation')
+                        'Could not replace source EPUB with %s' % main_variant)
                 output_path = self.api.format_abspath(source_id, 'EPUB')
-                if file_sha256(payload['translation_path']) != \
+                if file_sha256(main_path) != \
                         file_sha256(output_path):
                     raise RuntimeError(
                         'Replaced main EPUB failed SHA-256 verification')
@@ -737,7 +763,9 @@ class ConversionWorker:
             model = self.gui.library_view.model()
             if hasattr(model, 'refresh_ids'):
                 model.refresh_ids({source_id})
-            return output_path, translation_title, 0
+            main_title = (bilingual_title if main_variant == 'bilingual'
+                          else translation_title)
+            return output_path, main_title, 0
 
         created_ids = []
         try:

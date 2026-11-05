@@ -8,6 +8,8 @@ __English__ · [简体中文](README.zh-CN.md)
 
 A Calibre plugin to translate ebook into a specified language.
 
+Local fork 2.4.6: in Translation Variants preset A, **主書保留** selects translation-only (default) or bilingual as the main EPUB; the source and alternate version stay in Data. Presets B and C are unchanged.
+
 __Plugin Homepage__: [https://translator.bookfere.com](https://translator.bookfere.com)
 
 ![Translation illustration](images/sample-en.png)

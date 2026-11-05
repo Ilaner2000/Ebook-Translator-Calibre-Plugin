@@ -209,7 +209,7 @@ class TranslationSetting(QDialog):
         storage_layout.addWidget(QLabel(_('Variant Storage')))
         variant_storage = QComboBox()
         variant_storage.addItem(_(
-            'A — Chinese main file; source and bilingual in Data'),
+            'A — Replace main EPUB; source and alternate in Data'),
             'bundle_data')
         variant_storage.addItem(_(
             'B — Keep source; add Chinese book; bilingual in Data'),
@@ -220,6 +220,16 @@ class TranslationSetting(QDialog):
         self.disable_wheel_event(variant_storage)
         storage_layout.addWidget(variant_storage, 1)
         variants_layout.addLayout(storage_layout)
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(QLabel(_('主書保留')))
+        variant_main = QComboBox()
+        variant_main.addItem(_('純中譯'), 'translation')
+        variant_main.addItem(_('雙語'), 'bilingual')
+        self.disable_wheel_event(variant_main)
+        variant_main.setCurrentIndex(max(0, variant_main.findData(
+            self.config.get('translation_variant_main', 'translation'))))
+        main_layout.addWidget(variant_main, 1)
+        variants_layout.addLayout(main_layout)
         variant_gap_layout = QHBoxLayout()
         variant_gap_layout.addWidget(QLabel(_('Bilingual Gap')))
         variant_gap = QDoubleSpinBox()
@@ -242,9 +252,10 @@ class TranslationSetting(QDialog):
 
         storage_summaries = {
             'bundle_data': _(
-                'The Chinese EPUB replaces the main EPUB. The source and '
-                'bilingual EPUBs are archived in Data and must be exported '
-                'to read. The source leaves full-text search. If highlights '
+                'The selected version replaces the main EPUB. The source '
+                'and alternate EPUB are archived in Data and must be '
+                'exported to read. Only the main EPUB is available to '
+                'full-text search. If highlights '
                 'or reading progress exist (or their status cannot be '
                 'verified), you will be asked whether to keep A or use B.'),
             'linked_pair': _(
@@ -259,6 +270,12 @@ class TranslationSetting(QDialog):
             storage = variant_storage.itemData(index) or 'bundle_data'
             self.config.update(translation_variant_storage=storage)
             variant_summary.setText(storage_summaries[storage])
+            variant_main.setEnabled(
+                variants_enabled.isChecked() and storage == 'bundle_data')
+
+        variant_main.currentIndexChanged.connect(lambda index:
+            self.config.update(translation_variant_main=(
+                variant_main.itemData(index) or 'translation')))
 
         variant_storage.currentIndexChanged.connect(update_variant_storage)
         storage = self.config.get(
@@ -269,6 +286,8 @@ class TranslationSetting(QDialog):
 
         def toggle_variants(checked):
             variant_storage.setEnabled(checked)
+            variant_main.setEnabled(checked and (
+                variant_storage.currentData() == 'bundle_data'))
             variant_gap.setEnabled(checked)
             variant_summary.setEnabled(checked)
             self.config.update(translation_variants_enabled=checked)
