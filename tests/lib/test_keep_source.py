@@ -80,6 +80,37 @@ class TestKeepSource(unittest.TestCase):
                 self.assertIn('詞',''.join(root[1-kept].itertext()))
                 self.assertEqual(2,len(root.xpath('.//img')))
 
+    def test_duplicate_degraded_row_keeps_own_validation_and_render_status(self):
+        for kept in [0,1]:
+            with self.subTest(kept=kept):
+                root,handler,paragraphs=self.fixture(duplicate=True)
+                handler.keep_unrecoverable_source=True
+                self.mark_retained(paragraphs[kept])
+                source=root[kept];before=etree.tostring(source)
+                other=paragraphs[1-kept]
+                other.translation='target{{id_00000}}'
+                other.degraded=True
+                target_element=handler.elements[1-kept]
+                handler.add_translations(paragraphs)
+                self.assertEqual(before,etree.tostring(source))
+                self.assertTrue(target_element.degraded)
+                self.assertIn('target',''.join(root[1-kept].itertext()))
+                self.assertEqual(2,len(root.xpath('.//img')))
+
+    def test_retained_source_skips_original_color_for_ignored_descendant(self):
+        for position in ['only','below']:
+            with self.subTest(position=position):
+                root,handler,paragraphs=self.fixture(position=position)
+                handler.keep_unrecoverable_source=True
+                self.mark_retained(paragraphs[0]);paragraphs[1].translation='成功'
+                descendant=PageElement(root[0].find('em'),ignored=True)
+                descendant.set_position(position)
+                descendant.set_original_color('red')
+                handler.elements[2]=descendant
+                before=etree.tostring(root[0])
+                handler.add_translations(paragraphs)
+                self.assertEqual(before,etree.tostring(root[0]))
+
     def test_stale_raw_source_cannot_authorize_output(self):
         root,handler,paragraphs=self.fixture();handler.keep_unrecoverable_source=True
         self.mark_retained(paragraphs[0]);paragraphs[0].raw='<p>wrong</p>'
