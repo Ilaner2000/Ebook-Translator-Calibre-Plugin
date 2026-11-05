@@ -92,3 +92,13 @@ class TestBoundedPlaceholderRetry(unittest.TestCase):
         with self.assertRaises(TranslationCanceled):
             worker.translate_paragraph(self.paragraph('text{{id_00000}}'))
         engine.translate.assert_not_called()
+
+    def test_repaired_warm_row_clears_prior_terminal_reason(self):
+        worker,engine=self.worker([])
+        p=self.paragraph('word{{id_00000}}')
+        p.failure_reason='placeholder_unrecoverable'
+        p.translation='譯文{{id_00000}}'
+        worker.translate_paragraph(p)
+        self.assertIsNone(p.failure_reason)
+        self.assertTrue(p.is_cache)
+        engine.translate.assert_not_called()

@@ -266,6 +266,7 @@ class Translation:
     def translate_paragraph(self, paragraph):
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
+        paragraph.failure_reason = None
         if paragraph.translation and not self.fresh:
             try:
                 if self.quality_enabled():
@@ -290,7 +291,6 @@ class Translation:
         self.streaming('')
         self.streaming(_('Translating...'))
         text = self.glossary.replace(paragraph.original)
-        paragraph.failure_reason = None
         try:
             translation = self.translate_text(paragraph.row, text)
         except ParagraphProtocolFailed as error:
