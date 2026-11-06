@@ -44,6 +44,7 @@ class Element:
         self.only_policy = None
         self.inline_plan = None
         self.degraded = False
+        self.bilingual_verse_line = False
 
         self.position = None
         self.target_direction = None
@@ -214,6 +215,37 @@ class TocElement(Element):
 
 
 class PageElement(Element):
+    @staticmethod
+    def _short_verse_paragraph(node):
+        # Restrict grouping to consecutive short, single-P source quotations.
+        # Leave prose, mixed containers and BR-based layouts unchanged.
+        if node is None or not isinstance(node.tag, str) or get_name(node) != 'blockquote':
+            return None
+        if len(node) != 1 or (node.text or '').strip():
+            return None
+        paragraph = node[0]
+        if not isinstance(paragraph.tag, str) or get_name(paragraph) != 'p' or (paragraph.tail or '').strip():
+            return None
+        text = trim(''.join(paragraph.itertext()))
+        if not text or len(text) > 160 or any(get_name(n) == 'br' for n in paragraph.iterdescendants() if isinstance(n.tag, str)):
+            return None
+        return paragraph
+
+    def prepare_bilingual_layout(self):
+        # Freeze eligibility before translated siblings are inserted.
+        self.bilingual_verse_line = False
+        if self.position != 'below' or self._short_verse_paragraph(self.element) is None:
+            return
+        count = 1
+        for direction in ('getprevious', 'getnext'):
+            node = getattr(self.element, direction)()
+            while self._short_verse_paragraph(node) is not None:
+                count += 1
+                if count >= 3:
+                    self.bilingual_verse_line = True
+                    return
+                node = getattr(node, direction)()
+
     def get_name(self):
         return get_name(self.element)
 
@@ -308,7 +340,7 @@ class PageElement(Element):
             # replaces the copied inline style.
             style = 'color:%s' % self.translation_color
         if self.vertical_gap > 0 and self.position in ('above', 'below'):
-            edge = 'top' if self.position == 'below' else 'bottom'
+            edge = ('bottom' if self.bilingual_verse_line else 'top') if self.position == 'below' else 'bottom'
             gap = ('%.2f' % self.vertical_gap).rstrip('0').rstrip('.')
             declarations = []
             if name in inline_elements and apply_inline_gap:
@@ -328,6 +360,22 @@ class PageElement(Element):
                 style = ';'.join(filter(None, (style, *declarations)))
         if style is not None:
             new_element.set('style', style)
+        if self.bilingual_verse_line and name == 'blockquote' and self.position == 'below':
+            # Repeat the source P's hanging indent, but not its stanza-start
+            # margin. IDs/language stay unique and the source DOM is untouched.
+            source_p = self.element[0]
+            target_p = etree.Element(source_p.tag)
+            if source_p.get('class'):
+                target_p.set('class', source_p.get('class'))
+            styles = [source_p.get('style', '').strip().rstrip(';'), 'margin-top:0', 'margin-bottom:0']
+            if self.translation_color is not None:
+                styles.append('color:inherit')
+            target_p.set('style', ';'.join(filter(None, styles)))
+            target_p.text = new_element.text
+            new_element.text = None
+            for child in list(new_element):
+                target_p.append(child)
+            new_element.append(target_p)
         if self.position == 'only':
             apply_typography(new_element, self.only_policy, self.element)
         return new_element
@@ -847,6 +895,8 @@ class ElementHandler:
             element.set_original_color(self.original_color)
             element.set_translation_color(self.translation_color)
             element.set_vertical_gap(self.vertical_gap)
+            if isinstance(element, PageElement):
+                element.prepare_bilingual_layout()
             element.set_only_policy(getattr(self, 'only_policy', None))
             element.preserve_translation_text = bool(
                 (self.position == 'only' and getattr(self, 'only_policy', None) and self.only_policy.preserve_inline)
