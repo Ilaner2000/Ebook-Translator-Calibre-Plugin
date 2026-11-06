@@ -45,6 +45,8 @@ class Element:
         self.inline_plan = None
         self.degraded = False
         self.bilingual_verse_line = False
+        self.bilingual_prose_gap = False
+        self.bilingual_prose_target = None
 
         self.position = None
         self.target_direction = None
@@ -560,6 +562,8 @@ class PageElement(Element):
         else:
             # Add translation next to the element.
             self.element.addnext(new_element)
+            if self.position == 'below' and element_name == 'p':
+                self.bilingual_prose_target = new_element
             # # Added translation at the end of the element.
             # self.element.append(etree.SubElement(self.element, 'br'))
             # self.element.append(new_element)
@@ -1186,6 +1190,54 @@ def get_toc_elements(nodes, elements=[]):
         if len(node.nodes) > 0:
             get_toc_elements(node.nodes, elements)
     return elements
+
+
+def apply_bilingual_prose_spacing(elements, oeb, opts, handler):
+    """Fill zero paragraph boundaries using Calibre's resolved CSS, once/page.
+
+    Only mark ordinary sibling paragraphs. Existing spacing, complex containers,
+    merged paragraphs and non-below outputs keep their original behavior.
+    Inspect the actual inserted target, so ID/positional selectors and configured
+    colors are already reflected in its resolved CSS. Only target inline style
+    is changed; source DOM and stylesheets remain untouched.
+    """
+    if handler.position != 'below' or handler.vertical_gap <= 0 or handler.get_merge_length():
+        return
+    from calibre.ebooks.oeb.stylizer import Stylizer  # type: ignore
+    pages = {item.id: item for item in oeb.manifest.items}
+    stylizers = {}
+    originals = {element.element for element in elements if isinstance(element, PageElement)}
+    for element in elements:
+        if not isinstance(element, PageElement):
+            continue
+        element.bilingual_prose_gap = False
+        node = element.element
+        target = element.bilingual_prose_target
+        if target is None or node.getnext() is not target:
+            continue
+        following = target.getnext()
+        if get_name(node) != 'p' or following not in originals or get_name(following) != 'p':
+            continue
+        if (target.tail or '').strip() or any(get_name(n) == 'br' for n in node.iterdescendants() if isinstance(n.tag, str)):
+            continue
+        page = pages.get(element.page_id)
+        if page is None:
+            continue
+        if page.id not in stylizers:
+            stylizers[page.id] = Stylizer(page.data, page.href, oeb, opts, opts.output_profile)
+        stylizer = stylizers[page.id]
+        current, next_style = stylizer.style(target), stylizer.style(following)
+        if any(style['display'] != 'block' or style['float'] != 'none' or style['position'] != 'static' for style in (current, next_style)):
+            continue
+        values = (current['margin-bottom'], current['padding-bottom'], next_style['margin-top'], next_style['padding-top'])
+        if not all(isinstance(value, (int, float)) and value == 0 for value in values):
+            continue
+        if current['border-bottom-style'] not in ('none', 'hidden') or next_style['border-top-style'] not in ('none', 'hidden'):
+            continue
+        element.bilingual_prose_gap = True
+        gap = ('%.2f' % handler.vertical_gap).rstrip('0').rstrip('.')
+        style = target.get('style', '').strip().rstrip(';')
+        target.set('style', ';'.join(filter(None, (style, 'padding-bottom:%sem' % gap))))
 
 
 def get_page_elements(pages):

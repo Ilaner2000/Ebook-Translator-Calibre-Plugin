@@ -31,7 +31,7 @@ from .utils import log, sep, uid, open_path, open_file
 from .cache import get_cache
 from .element import (
     get_element_handler, get_srt_elements, get_toc_elements, get_page_elements,
-    get_metadata_elements, get_pgn_elements)
+    get_metadata_elements, get_pgn_elements, apply_bilingual_prose_spacing)
 from .translation import get_translator, get_translation
 from .exception import ConversionAbort
 
@@ -138,6 +138,7 @@ def convert_book(
                               and translation.retained_source(p))
         translation.handle(paragraphs)
         element_handler.add_translations(paragraphs)
+        apply_bilingual_prose_spacing(elements, oeb, opts, element_handler)
 
         log.info(sep())
         log.info(_('Start to convert ebook format...'))
