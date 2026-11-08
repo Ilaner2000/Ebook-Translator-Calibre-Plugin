@@ -41,6 +41,7 @@ class Paragraph:
         self.degraded = False
         self.degrade_reason = None
         self.failure_reason = None
+        self.source_retention = None
 
     def get_attributes(self) -> dict:
         if self.attributes:
@@ -71,6 +72,23 @@ class Paragraph:
                 processed_lines.append('')
         self.translation = single_saparator.join(processed_lines)
 
+
+
+SOURCE_RETENTION_REASONS = ('placeholder_unrecoverable', 'inline_protocol_exhausted')
+
+
+def source_retention_matches(paragraph, record):
+    """Only an explicit, source-bound terminal decision may restore NULL output."""
+    if not isinstance(record, dict) or paragraph.translation is not None:
+        return False
+    if not isinstance(paragraph.raw, str) or not isinstance(paragraph.original, str):
+        return False
+    return (record.get('version') == 1 and record.get('id') == paragraph.id
+            and record.get('page') == paragraph.page
+            and record.get('source_md5') == paragraph.md5
+            and record.get('reason') in SOURCE_RETENTION_REASONS
+            and record.get('raw_sha256') == hashlib.sha256(paragraph.raw.encode('utf-8')).hexdigest()
+            and record.get('original_sha256') == hashlib.sha256(paragraph.original.encode('utf-8')).hexdigest())
 
 def default_cache_path():
     if sys.platform == 'win32':
@@ -113,6 +131,7 @@ def custom_cache_path():
 
 class TranslationCache:
     fresh = True
+    include_retained_sources = False
     dir_path = custom_cache_path()
     cache_path = os.path.join(dir_path, 'cache')
     temp_path = os.path.join(dir_path, 'temp')
@@ -316,6 +335,14 @@ class TranslationCache:
                     paragraph.degrade_reason = info.get('reason')
             except (ValueError, TypeError):
                 pass  # No valid explicit metadata => normal strict validation.
+        retained = self.get_info('only_v2_source_retained:' + str(paragraph.id))
+        if retained:
+            try:
+                record = json.loads(retained)
+                if source_retention_matches(paragraph, record):
+                    paragraph.source_retention = record
+            except (TypeError, ValueError):
+                pass
         return paragraph
 
     def all_paragraphs(self):
@@ -323,7 +350,8 @@ class TranslationCache:
         for item in self.all():
             paragraph = self._paragraph(item)
             if self.cache_only and not paragraph.translation:
-                continue
+                if not (self.include_retained_sources and paragraph.source_retention):
+                    continue
             paragraphs.append(paragraph)
         return paragraphs
 
@@ -338,7 +366,21 @@ class TranslationCache:
                 self.cursor.execute('INSERT INTO info VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value', (key, value))
             else:
                 self.cursor.execute('DELETE FROM info WHERE key=?', (key,))
-            # update() commits the target and its flag in the SAME transaction.
+            retained_key = 'only_v2_source_retained:' + str(paragraph.id)
+            if (getattr(paragraph, 'keep_source', False) is True
+                    and paragraph.translation is None
+                    and paragraph.failure_reason in SOURCE_RETENTION_REASONS):
+                record = {
+                    'version': 1, 'id': paragraph.id, 'page': paragraph.page,
+                    'source_md5': paragraph.md5, 'reason': paragraph.failure_reason,
+                    'raw_sha256': hashlib.sha256(paragraph.raw.encode('utf-8')).hexdigest(),
+                    'original_sha256': hashlib.sha256(paragraph.original.encode('utf-8')).hexdigest(),
+                }
+                self.cursor.execute('INSERT INTO info VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value=excluded.value',
+                                    (retained_key, json.dumps(record, ensure_ascii=False)))
+            else:
+                self.cursor.execute('DELETE FROM info WHERE key=?', (retained_key,))
+            # update() commits the target and both flags in the SAME transaction.
             self.update(
                 paragraph.id, translation=paragraph.translation,
                 engine_name=paragraph.engine_name,

@@ -128,6 +128,7 @@ def convert_book(
         original_group = element_handler.prepare_original(elements)
         cache.save(original_group)
 
+        cache.include_retained_sources = element_handler.keep_unrecoverable_source
         paragraphs = cache.all_paragraphs()
         if (element_handler.keep_unrecoverable_source
                 and getattr(cache, 'cache_only', False) is True

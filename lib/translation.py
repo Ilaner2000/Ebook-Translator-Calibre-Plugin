@@ -1,6 +1,7 @@
 import re
 import time
 import json
+import hashlib
 from collections import Counter
 from types import GeneratorType
 
@@ -115,9 +116,23 @@ class Translation:
         if self.keep_unrecoverable_source is not True:
             return False
         record = self.retained_sources.get(paragraph.id)
-        return (self.keep_unrecoverable_source is True and record is not None
-                and record['source_md5'] == paragraph.md5
+        if record is None and not self.fresh:
+            from .cache import source_retention_matches
+            cached = getattr(paragraph, 'source_retention', None)
+            if source_retention_matches(paragraph, cached):
+                record = {
+                    'id': paragraph.id, 'page': paragraph.page,
+                    'source_md5': paragraph.md5, 'original': paragraph.original,
+                    'source_preview': paragraph.original[:60], 'reason': cached['reason'],
+                    'raw_sha256': cached['raw_sha256'],
+                }
+                self.retained_sources[paragraph.id] = record
+                paragraph.retained_from_cache = True
+        return (record is not None and record['source_md5'] == paragraph.md5
                 and record['original'] == paragraph.original
+                and record['page'] == paragraph.page
+                and (record.get('raw_sha256') is None or record['raw_sha256'] ==
+                     hashlib.sha256(paragraph.raw.encode('utf-8')).hexdigest())
                 and paragraph.translation is None)
 
     def retained_source_manifest(self):
@@ -210,6 +225,8 @@ class Translation:
             self.inline_request_limit - int(can_degrade),
             max(1, int(self.translator.request_attempt) + 1))
         placeholder_failed = False
+        protocol_seen = False
+        quality_seen = False
         requests = 0
         for attempt in range(strict_limit):
             if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
@@ -231,6 +248,10 @@ class Translation:
                 raise
             except Exception as err:
                 last_error = err
+                quality_seen = quality_seen or isinstance(err, TranslationQualityError)
+                protocol_seen = protocol_seen or (
+                    isinstance(err, InlineAlignmentError)
+                    and not isinstance(err, TranslationQualityError))
                 if self.cancel_request() or self.translator.match_error(str(err)):
                     raise TranslationCanceled(_('Translation canceled.'))
                 if attempt + 1 >= strict_limit:
@@ -263,13 +284,22 @@ class Translation:
                 raise
             except Exception as err:
                 last_error = err
+                quality_seen = quality_seen or isinstance(err, TranslationQualityError)
+                protocol_seen = protocol_seen or (
+                    isinstance(err, InlineAlignmentError)
+                    and not isinstance(err, TranslationQualityError))
                 if self.cancel_request() or self.translator.match_error(str(err)):
                     raise TranslationCanceled(_('Translation canceled.'))
         # Validation failure is terminal for this ROW, not a provider outage.
         # Never let ten malformed rows cancel the remaining book queue.
-        protocol_failed = (
-            isinstance(last_error, InlineAlignmentError)
-            and not isinstance(last_error, TranslationQualityError))
+        last_is_protocol = (isinstance(last_error, InlineAlignmentError)
+                            and not isinstance(last_error, TranslationQualityError))
+        # A final timeout must not erase the earlier proven inline failure.
+        # Keep-source opt-in alone never permits pure outages or quality errors.
+        mixed_protocol_failure = (self.keep_unrecoverable_source is True
+                                  and protocol_seen and not quality_seen
+                                  and not isinstance(last_error, InlineAlignmentError))
+        protocol_failed = last_is_protocol or mixed_protocol_failure
         if protocol_failed:
             reason = ('placeholder_unrecoverable' if has_reserves
                       else 'inline_protocol_exhausted')
@@ -278,20 +308,28 @@ class Translation:
         self.log('V2 terminal failure: ' + json.dumps({
             'row': row, 'reason': reason, 'requests': requests,
             'request_limit': self.inline_request_limit,
-            'reserve_loss_seen': placeholder_failed}), True)
+            'reserve_loss_seen': placeholder_failed,
+            'protocol_seen': protocol_seen, 'quality_seen': quality_seen,
+            'last_error_type': type(last_error).__name__}), True)
         message = (
             'V2 paragraph exhausted (%s; %s/%s requests); '
             'available legacy fallback failed: %s' % (
                 reason, requests, self.inline_request_limit, last_error))
-        if protocol_failed:
-            raise ParagraphProtocolFailed(message, reason)
-        raise TranslationFailed(message)
+        error = (ParagraphProtocolFailed(message, reason) if protocol_failed
+                 else TranslationFailed(message))
+        error.failure_context = {
+            'reason': reason, 'requests': requests, 'request_limit': self.inline_request_limit,
+            'protocol_seen': protocol_seen, 'quality_seen': quality_seen,
+            'last_error_type': type(last_error).__name__,
+        }
+        raise error
 
     def translate_paragraph(self, paragraph):
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         paragraph.failure_reason = None
         paragraph.keep_source = False
+        paragraph.retained_from_cache = False
         if self.retained_source(paragraph):
             paragraph.keep_source = True
             paragraph.failure_reason = self.retained_sources[paragraph.id]['reason']
@@ -326,6 +364,7 @@ class Translation:
         try:
             translation = self.translate_text(paragraph.row, text)
         except ParagraphProtocolFailed as error:
+            paragraph.failure_context = getattr(error, 'failure_context', {})
             paragraph.failure_reason = error.reason
             paragraph.translation = None
             if self.keep_unrecoverable_source is True:
@@ -337,6 +376,10 @@ class Translation:
                     'source_preview': paragraph.original[:60],
                     'reason': error.reason,
                 }
+            self.log('V2 retained failure row: ' + json.dumps({
+                'id': paragraph.id, 'page': paragraph.page, 'source_md5': paragraph.md5,
+                'reason': error.reason, 'retained': paragraph.keep_source,
+                'failure': paragraph.failure_context}, ensure_ascii=False), True)
             raise
         degraded = getattr(translation, 'degraded', False) is True
         degrade_reason = getattr(translation, 'degrade_reason', None)
@@ -380,7 +423,9 @@ class Translation:
         # A decoded warm result is a render-only view. Its native target and
         # hash-bound degraded metadata must remain byte/value-identical.
         normalized_view = getattr(paragraph, '_normalized_cache_view', None)
-        if not (self.quality_enabled() and paragraph.is_cache
+        retained_cache_view = (getattr(paragraph, 'retained_from_cache', False) is True
+                               and paragraph.is_cache and self.retained_source(paragraph))
+        if not retained_cache_view and not (self.quality_enabled() and paragraph.is_cache
                 and getattr(paragraph, 'memory_normalized', False)
                 and normalized_view == (getattr(paragraph, 'md5', None), paragraph.original, paragraph.translation)):
             self.callback(paragraph)
