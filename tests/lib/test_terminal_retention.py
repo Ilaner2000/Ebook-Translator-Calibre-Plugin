@@ -30,6 +30,18 @@ class TestMixedTerminal(unittest.TestCase):
         self.assertTrue(p.failure_context['protocol_seen'])
         self.assertEqual('TimeoutError', p.failure_context['last_error_type'])
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
+    def test_reserve_protocol_then_timeout_keeps_placeholder_reason(self, _sleep):
+        worker, engine = retry.TestBoundedPlaceholderRetry().worker([BAD, BAD, TimeoutError('fallback')])
+        worker.keep_unrecoverable_source = True
+        p = retry.TestBoundedPlaceholderRetry().paragraph(SOURCE + ' {{id_00000}}')
+        with self.assertRaises(ParagraphProtocolFailed): worker.translate_paragraph(p)
+        self.assertTrue(p.keep_source)
+        self.assertEqual('placeholder_unrecoverable', p.failure_reason)
+        self.assertIsNone(p.translation)
+        self.assertEqual(3, engine.translate.call_count)
+        self.assertTrue(p.failure_context['protocol_seen'])
+        self.assertEqual('TimeoutError', p.failure_context['last_error_type'])
+    @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
     def test_default_off_keeps_existing_provider_failure_semantics(self, _sleep):
         worker, engine = retry.TestBoundedPlaceholderRetry().worker([BAD, BAD, TimeoutError('fallback')])
         p = retry.TestBoundedPlaceholderRetry().paragraph(SOURCE)

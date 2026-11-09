@@ -12,6 +12,8 @@ Local fork 2.4.6: in Translation Variants preset A, **主書保留** selects tra
 
 Local fork 2.4.7: V2 paragraphs use at most three engine attempts including legacy fallback; unrecoverable protected text is listed at job end, stays untranslated in cache, and blocks EPUB output while other rows continue.
 
+Local fork 2.4.10: with **不可恢復段落保留原文並照常輸出** enabled, proven protocol failures remain eligible for source retention if the last fallback times out. Explicit source-bound retention records survive cache reloads without storing English as a successful translation. Retained rows stay English, with original anchors and links, in translation-only and bilingual EPUBs. Provider outages and quality errors retain their existing guards. Older caches without these records require an explicit recovery decision; an empty target alone never authorizes skipping a row.
+
 Local fork 2.4.9：雙語下置的連續短偈頌，原句與譯句成組，段距留在句組之後；普通段落只在譯後原有段距為零時補上與譯前相同的間距，既有段距不重複加大。
 
 2.4.8: the optional **不可恢復段落保留原文並照常輸出** setting (off by default) keeps failed protocol paragraphs and their images as source text, once in bilingual output, while listing them in the job log and variants manifest; missing cache targets remain empty. With the option off, V2 still blocks incomplete output.
