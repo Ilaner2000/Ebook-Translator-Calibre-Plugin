@@ -462,11 +462,13 @@ class Translation:
             raise
 
     def _translate_paragraph(self, paragraph):
-        if self.cancel_request():
-            raise TranslationCanceled(_('Translation canceled.'))
+        # A previous variant's outcome is not authority for this call. Reset
+        # before invoking any callback that can fail, including cancellation.
         paragraph.failure_reason = None
         paragraph.keep_source = False
         paragraph.retained_from_cache = False
+        if self.cancel_request():
+            raise TranslationCanceled(_('Translation canceled.'))
         if self.retained_source(paragraph):
             paragraph.keep_source = True
             paragraph.failure_reason = self.retained_sources[paragraph.id]['reason']

@@ -81,3 +81,17 @@ class TestRowFateR3(unittest.TestCase):
   worker.set_logging(lambda msg,error=False:logs.append(msg))
   with self.assertRaisesRegex(TranslationFailed,'failed paragraph rows:.*729'):worker.handle([p])
   self.assertFalse(p.keep_source);self.assertFalse(any('Translation completed' in s for s in logs))
+
+ @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
+ def test_previous_variant_retention_cannot_mask_entry_unknown_or_fatal(self,_sleep):
+  for error in [RuntimeError('entry callback failed'),MemoryError('entry memory failure')]:
+   with self.subTest(error=type(error).__name__):
+    worker,engine=self.worker(['bad']*3);p=self.paragraph('word{{id_00000}}')
+    with self.assertRaises(ParagraphTerminalFailed):worker.translate_paragraph(p)
+    self.assertTrue(p.keep_source)
+    worker.set_cancel_request(Mock(side_effect=[error]+[False]*30));logs=[]
+    worker.set_logging(lambda msg,error=False:logs.append(msg))
+    with self.assertRaisesRegex(TranslationFailed,'failed paragraph rows:.*729'):worker.handle([p])
+    self.assertFalse(p.keep_source);self.assertTrue(p.error)
+    self.assertTrue(any('V2 blocked failure row:' in s and type(error).__name__ in s for s in logs))
+    self.assertFalse(any('Translation completed' in s for s in logs))
