@@ -210,6 +210,8 @@ class Base:
                 'timeout': int(self.request_timeout),
                 'raw_object': self.stream
             }
+            if self.inline_protocol:
+                params['preserve_http_error'] = True
             response_stage = 'request'
             if self.proxy_type == 'socks5' and self.proxy_host is not None \
                     and self.proxy_port is not None:

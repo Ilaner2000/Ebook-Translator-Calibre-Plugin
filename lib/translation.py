@@ -431,6 +431,37 @@ class Translation:
         raise error
 
     def translate_paragraph(self, paragraph):
+        try:
+            return self._translate_paragraph(paragraph)
+        except Exception as error:
+            if isinstance(error, TranslationCanceled):
+                # A retained result from the preceding variant cannot mask a
+                # cancellation before this variant starts its row.
+                paragraph.keep_source = False
+            # Handler suppresses cancelled rows and stores other errors without
+            # printing them. Bind every non-retained V2 failure to a source row,
+            # including errors after translate_text (e.g. glossary restoration).
+            if self.quality_enabled() and getattr(paragraph, 'keep_source', False) is not True:
+                paragraph.error = traceback_error()
+                chain = list(error_chain(error))
+                self.log('V2 blocked failure row: ' + json.dumps({
+                    'id': paragraph.id, 'page': paragraph.page,
+                    'source_md5': paragraph.md5,
+                    'error_type': type(error).__name__,
+                    'error_chain': [type(item).__name__ for item in chain],
+                    'error_details': [{'type': type(item).__name__, 'message': str(item)[:2000]}
+                                      for item in chain],
+                    'http_statuses': [item.code for item in chain
+                                      if isinstance(item, (StandardHTTPError, MechanizeHTTPError))],
+                    'response_stages': [item.response_stage for item in chain
+                                        if isinstance(item, UnexpectedResult)
+                                        and hasattr(item, 'response_stage')],
+                    'failure_reason': getattr(paragraph, 'failure_reason', None),
+                    'error': paragraph.error,
+                }, ensure_ascii=False), True)
+            raise
+
+    def _translate_paragraph(self, paragraph):
         if self.cancel_request():
             raise TranslationCanceled(_('Translation canceled.'))
         paragraph.failure_reason = None
@@ -617,9 +648,22 @@ class Translation:
             raise TranslationFailed(message)
         if self.strict_inline and hasattr(self.translator, 'get_session_usage'):
             self.log('Provider token usage: ' + json.dumps(self.translator.get_session_usage(), sort_keys=True))
-        blocked = any(getattr(p, 'failure_reason', None)
-                      and getattr(p, 'keep_source', False) is not True
-                      for p in paragraphs)
+        blocked_rows = [p for p in paragraphs
+                        if getattr(p, 'keep_source', False) is not True
+                        and (getattr(p, 'failure_reason', None) or p.error
+                             or not p.translation)]
+        blocked = bool(blocked_rows)
+        if self.quality_enabled() and blocked:
+            # Never report successful completion for unknown/fatal/cancelled
+            # or unprocessed NULL rows. Retention remains explicit and typed.
+            failures = [{'id': p.id, 'page': p.page,
+                         'failure_reason': getattr(p, 'failure_reason', None),
+                         'has_error': bool(p.error), 'has_translation': bool(p.translation)}
+                        for p in blocked_rows]
+            message = 'V2 translation blocked; failed paragraph rows: ' + json.dumps(failures, ensure_ascii=False)
+            self.log(message, True)
+            self.progress(1, message)
+            raise TranslationFailed(message)
         message = (_('Translation finished with unrecoverable paragraphs; '
                      'output remains blocked.') if blocked else
                    (_('Translation completed with source paragraphs retained.')

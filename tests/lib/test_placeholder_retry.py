@@ -69,7 +69,9 @@ class TestBoundedPlaceholderRetry(unittest.TestCase):
         saved=[];logs=[]
         worker.set_callback(lambda p:saved.append((p.id,p.translation)))
         worker.set_logging(lambda message,error=False:logs.append(message))
-        worker.handle(paragraphs)
+        # R3 reports the known blocked rows after draining/saving the queue.
+        with self.assertRaisesRegex(TranslationFailed, 'failed paragraph rows:'):
+            worker.handle(paragraphs)
         self.assertEqual(37, engine.translate.call_count)
         self.assertEqual(13,len(saved))
         self.assertEqual('成功',paragraphs[-1].translation)

@@ -155,7 +155,7 @@ def traceback_error():
 
 def request(
         url, data=None, headers={}, method='GET', timeout=30, proxy_uri=None,
-        raw_object=False) -> Response | str | None:
+        raw_object=False, preserve_http_error=False) -> Response | str | None:
     br = Browser()
     br.set_handle_robots(False)
 
@@ -194,6 +194,9 @@ def request(
             return response
         return response.read().decode('utf-8').strip()
     except HTTPError as e:
+        # V2 requires the actual HTTP status/cause; prose wrappers lose it.
+        if preserve_http_error:
+            raise
         raise Exception(traceback_error() + '\n\n' + e.read().decode('utf-8'))
 
 

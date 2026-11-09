@@ -59,3 +59,9 @@ __Plugin Homepage__: [https://translator.bookfere.com](https://translator.bookfe
 ## License
 
 [GNU General Public License v3.0](LICENSE)
+
+### 2.4.11: V2 terminal row diagnostics
+
+V2 HTTP failures retain their structured status through the request boundary. HTTP 5xx exhaustion retains source for the current job and retries in the next ordinary job; HTTP 4xx, unknown errors and fatal failures remain blocked. Every blocked V2 row logs its source ID, page, exception chain and response stage. A job with failed or unprocessed required rows reports a blocking error before rendering instead of a successful completion notice.
+
+The 2.4.10 Equality row 729 log proves its first timeout attempt, but does not contain its final exception; the new diagnostics identify any recurrence without guessing a fallback for arbitrary NULL translations.
