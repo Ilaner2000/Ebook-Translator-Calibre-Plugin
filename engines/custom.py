@@ -7,6 +7,7 @@ from lxml import etree
 from calibre.utils.localization import _  # type: ignore
 
 from ..lib.utils import is_str
+from ..lib.exception import ResponseParseFailed
 
 from . import builtin_engines
 from .base import Base
@@ -157,7 +158,7 @@ class CustomTranslate(Base):
                     self._session_usage['output_tokens'] += outgoing
         result = eval(self.response, {"response": response})
         if not is_str(result):
-            raise Exception(_('Response was parsed incorrectly.'))
+            raise ResponseParseFailed(_('Response was parsed incorrectly.'))
         return result
 
     def get_session_usage(self):

@@ -77,6 +77,9 @@ class Paragraph:
 SOURCE_RETENTION_REASONS = (
     'placeholder_unrecoverable', 'inline_protocol_exhausted',
     'quality_exhausted', 'provider_response_exhausted')
+# Transport failures may be retained only in the current job, never reloaded as
+# a permanent skip. The next ordinary job retries these NULL targets.
+SOURCE_RETENTION_OUTPUT_REASONS = SOURCE_RETENTION_REASONS + ('provider_transport_exhausted',)
 
 
 def source_retention_matches(paragraph, record):

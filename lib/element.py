@@ -11,7 +11,7 @@ from .utils import (
     log, ns, uid, trim, sorted_mixed_keys, open_file, css_to_xpath,
     create_xpath)
 from .config import get_config
-from .cache import SOURCE_RETENTION_REASONS
+from .cache import SOURCE_RETENTION_OUTPUT_REASONS
 from .only_mode import OnlyPolicy, InlinePlan, InlineAlignmentError, apply_typography
 
 
@@ -955,7 +955,7 @@ class ElementHandler:
             if (getattr(self, 'keep_unrecoverable_source', False) is True
                     and getattr(paragraph, 'keep_source', False) is True
                     and translated is None
-                    and getattr(paragraph, 'failure_reason', None) in SOURCE_RETENTION_REASONS):
+                    and getattr(paragraph, 'failure_reason', None) in SOURCE_RETENTION_OUTPUT_REASONS):
                 self.kept_source_originals.add(original)
                 self.kept_source_paragraphs.add(id(paragraph))
                 self.kept_source_rows[identity] = paragraph.raw

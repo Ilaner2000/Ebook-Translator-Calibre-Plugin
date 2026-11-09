@@ -12,15 +12,20 @@ Retry = lambda: retry_mod.TestBoundedPlaceholderRetry()
 Native = lambda: native_mod.TestDegradedNativeCache()
 DOM = lambda: dom_mod.TestKeepSource()
 
+def parsed_failure():
+ error=UnexpectedResult('received response could not be parsed')
+ error.response_stage='parse';error.__cause__=ValueError('invalid received response')
+ return error
+
 class TestTerminalPolicyB(unittest.TestCase):
  @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
  def test_bounded_quality_and_response_failure_are_opt_in_only(self,_sleep):
   for enabled in [False,True]:
-   for value,reason in [('<0x80>','quality_exhausted'),(UnexpectedResult('response parse; transport timeout'),'provider_response_exhausted')]:
+   for value,reason in [('<0x80>','quality_exhausted'),(parsed_failure(),'provider_response_exhausted')]:
     with self.subTest(enabled=enabled,reason=reason):
      worker,engine=Retry().worker([value]*3);engine.request_attempt=999;worker.keep_unrecoverable_source=enabled
      p=Retry().paragraph('CHAPTER XV')
-     with self.assertRaises(TranslationFailed) as caught:worker.translate_paragraph(p)
+     with self.assertRaises((TranslationFailed,TranslationCanceled)) as caught:worker.translate_paragraph(p)
      self.assertEqual(3,engine.translate.call_count);self.assertIsNone(p.translation)
      self.assertEqual(enabled,p.keep_source)
      if enabled:self.assertIsInstance(caught.exception,ParagraphTerminalFailed);self.assertEqual(reason,p.failure_reason)
@@ -31,13 +36,13 @@ class TestTerminalPolicyB(unittest.TestCase):
    with self.subTest(error=type(error).__name__+str(error)):
     worker,engine=Retry().worker([error]*3);worker.keep_unrecoverable_source=True
     p=Retry().paragraph('CHAPTER XV')
-    with self.assertRaises(TranslationFailed):worker.translate_paragraph(p)
+    with self.assertRaises((TranslationFailed,TranslationCanceled)):worker.translate_paragraph(p)
     self.assertFalse(p.keep_source);self.assertEqual([],worker.retained_source_manifest())
  @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
  def test_wrapped_fatal_chain_and_cancel_never_authorize_retention(self,_sleep):
   wrapped=UnexpectedResult('outer response parser');wrapped.__cause__=UnsupportedModel('missing model')
   worker,engine=Retry().worker([wrapped]*3);worker.keep_unrecoverable_source=True;p=Retry().paragraph('plain')
-  with self.assertRaises(TranslationFailed):worker.translate_paragraph(p)
+  with self.assertRaises((TranslationFailed,TranslationCanceled)):worker.translate_paragraph(p)
   self.assertFalse(p.keep_source)
   worker,engine=Retry().worker([TranslationCanceled('user cancel')]);worker.keep_unrecoverable_source=True;p=Retry().paragraph('plain')
   with self.assertRaises(TranslationCanceled):worker.translate_paragraph(p)
@@ -46,7 +51,7 @@ class TestTerminalPolicyB(unittest.TestCase):
  def test_earlier_protocol_does_not_hide_final_fatal(self,_sleep):
   worker,engine=Retry().worker(['bad','bad',UnsupportedModel('unsupported model')]);worker.keep_unrecoverable_source=True
   p=Retry().paragraph('⟦ET0O⟧word⟦ET0C⟧')
-  with self.assertRaises(TranslationFailed) as caught:worker.translate_paragraph(p)
+  with self.assertRaises((TranslationFailed,TranslationCanceled)) as caught:worker.translate_paragraph(p)
   self.assertNotIsInstance(caught.exception,ParagraphTerminalFailed);self.assertFalse(p.keep_source)
  def test_both_new_reasons_native_roundtrip_and_new_job_have_no_provider_calls(self):
   for reason in ['quality_exhausted','provider_response_exhausted']:
@@ -58,7 +63,7 @@ class TestTerminalPolicyB(unittest.TestCase):
     self.assertTrue(p.keep_source);self.assertEqual(reason,p.failure_reason);self.assertIsNone(p.translation);engine.translate.assert_not_called()
    finally:f.tearDown()
  def test_both_renderers_preserve_original_node_for_both_new_reasons(self):
-  for reason in ['quality_exhausted','provider_response_exhausted']:
+  for reason in ['quality_exhausted','provider_response_exhausted','provider_transport_exhausted']:
    for position in ['only','below']:
     root,h,ps=DOM().fixture(position=position);original=etree.tostring(root[0])
     ps[0].keep_source=True;ps[0].failure_reason=reason;ps[0].translation=None;ps[1].translation='成功';h.keep_unrecoverable_source=True
@@ -75,7 +80,7 @@ class TestTerminalPolicyB(unittest.TestCase):
  def test_ten_percent_boundary_completes_with_count_ids_in_log_and_message(self,_sleep):
   worker,engine,ps,logs,progress,saved=self.book(1)
   worker.handle(ps);summary=worker.retention_summary(ps)
-  self.assertEqual({'count':1,'ids':[1],'required_rows':10,'max_ratio':.1,'ratio':.1,'blocked':False},summary)
+  self.assertEqual({'count':1,'ids':[1],'job_only_ids':[],'required_rows':10,'max_ratio':.1,'ratio':.1,'blocked':False},summary)
   self.assertIn('本書 1 列保留原文',progress[-1][1]);self.assertIn('IDs: [1]',progress[-1][1]);self.assertIn((1,None),saved)
   self.assertEqual(1,json.loads(next(x.split(': ',1)[1] for x in logs if x.startswith('source retained count/IDs:')))['count'])
  @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')

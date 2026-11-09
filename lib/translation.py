@@ -2,6 +2,10 @@ import re
 import time
 import json
 import hashlib
+import errno
+from urllib.error import HTTPError as StandardHTTPError, URLError
+from mechanize import HTTPError as MechanizeHTTPError
+from lxml.etree import XMLSyntaxError
 from collections import Counter
 from types import GeneratorType
 
@@ -16,7 +20,7 @@ from .utils import log, sep, trim, dummy, traceback_error
 from .config import get_config
 from .exception import (
     TranslationFailed, TranslationCanceled, ParagraphProtocolFailed,
-    ParagraphTerminalFailed, UnexpectedResult, UnsupportedModel)
+    ParagraphTerminalFailed, UnexpectedResult, UnsupportedModel, ResponseParseFailed)
 from .handler import Handler
 from .only_mode import InlineAlignmentError, TOKEN, validate_inline_translation
 from .translation_quality import normalize_translation, TranslationQualityError
@@ -25,26 +29,75 @@ from .translation_quality import normalize_translation, TranslationQualityError
 load_translations()  # type: ignore
 
 
-def fatal_row_error(error):
-    """Never source-retain authentication, unsupported configuration or fatal errors.
+def error_chain(error):
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        pending.extend((current.__cause__, current.__context__))
+        if isinstance(current, URLError) and isinstance(current.reason, BaseException):
+            pending.append(current.reason)
 
-    Base.translate wraps transport/parser errors in UnexpectedResult; inspect its
-    real exception chain as well as status text. Unknown exceptions remain hard
-    failures unless an earlier real protocol error established that narrow path.
-    """
-    seen = set()
-    while error is not None and id(error) not in seen:
-        seen.add(id(error))
-        if isinstance(error, (TranslationCanceled, UnsupportedModel, MemoryError,
-                              PermissionError, FileNotFoundError, NotImplementedError, SystemError)):
+
+def fatal_row_error(error):
+    """Typed/structured fatal evidence only; response prose is never a status."""
+    for current in error_chain(error):
+        if isinstance(current, (TranslationCanceled, UnsupportedModel, MemoryError,
+                                PermissionError, FileNotFoundError, NotImplementedError,
+                                SystemError, RecursionError, KeyboardInterrupt, SystemExit)):
             return True
-        status = getattr(error, 'code', None)
-        if type(status) is int and 400 <= status < 500:
+        if isinstance(current, (StandardHTTPError, MechanizeHTTPError)):
+            if type(current.code) is int and 400 <= current.code < 500:
+                return True
+        if isinstance(current, OSError) and current.errno in {
+                errno.ENOSPC, errno.ENOMEM, errno.EACCES, errno.EPERM, errno.EROFS,
+                errno.EMFILE, errno.ENFILE, errno.EBADF, errno.ENOENT}:
             return True
-        if re.search(r'(?i)\b(?:400|401|402|403|404|405|410|422|429|unauthorized|forbidden|fatal)\b|invalid api.?key|unsupported model|model not found', str(error)):
-            return True
-        error = error.__cause__ or error.__context__
     return False
+
+
+def transport_error(error):
+    if isinstance(error, (StandardHTTPError, MechanizeHTTPError)):
+        return type(error.code) is int and 500 <= error.code < 600
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    if isinstance(error, URLError):
+        return isinstance(error.reason, BaseException) and transport_error(error.reason)
+    return (isinstance(error, OSError) and error.errno in {
+        errno.ETIMEDOUT, errno.ECONNRESET, errno.ECONNREFUSED, errno.ECONNABORTED,
+        errno.ENETDOWN, errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EPIPE})
+
+
+def row_error_kind(error):
+    """Only understood failures can authorize fallback; unknown causes veto it."""
+    if fatal_row_error(error):
+        return None
+    chain = list(error_chain(error))
+    parse_types = (ValueError, KeyError, IndexError, TypeError, XMLSyntaxError,
+                   ResponseParseFailed)
+    if isinstance(error, UnexpectedResult):
+        inner = [item for item in chain if item is not error]
+        stage = getattr(error, 'response_stage', None)
+        if stage == 'request' and inner and all(transport_error(item) for item in inner):
+            return 'transport'
+        if stage == 'parse' and inner and all(isinstance(item, parse_types) for item in inner):
+            return 'response'
+        return None
+    if isinstance(error, TranslationQualityError):
+        if all(isinstance(item, parse_types + (InlineAlignmentError,)) for item in chain):
+            return 'quality'
+    elif isinstance(error, InlineAlignmentError):
+        if all(isinstance(item, parse_types + (InlineAlignmentError,)) for item in chain):
+            return 'protocol'
+    elif isinstance(error, ResponseParseFailed):
+        if all(isinstance(item, parse_types) for item in chain):
+            return 'response'
+    elif all(transport_error(item) for item in chain):
+        return 'transport'
+    return None
 
 
 class Glossary:
@@ -168,7 +221,9 @@ class Translation:
         ids = sorted(p.id for p in required.values()
                      if getattr(p, 'keep_source', False) is True and self.retained_source(p))
         count, total = len(ids), len(required)
-        return {'count': count, 'ids': ids, 'required_rows': total,
+        job_only = sorted(p.id for p in required.values() if p.id in ids
+                          and getattr(p, 'failure_reason', None) == 'provider_transport_exhausted')
+        return {'count': count, 'ids': ids, 'job_only_ids': job_only, 'required_rows': total,
                 'max_ratio': 0.10, 'ratio': count / total if total else 0.0,
                 'blocked': bool(total and count * 10 > total)}
 
@@ -260,6 +315,7 @@ class Translation:
         protocol_seen = False
         quality_seen = False
         fatal_seen = False
+        last_kind = None
         requests = 0
         for attempt in range(strict_limit):
             if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
@@ -282,12 +338,18 @@ class Translation:
             except Exception as err:
                 last_error = err
                 fatal_seen = fatal_seen or fatal_row_error(err)
+                last_kind = row_error_kind(err)
                 quality_seen = quality_seen or isinstance(err, TranslationQualityError)
                 protocol_seen = protocol_seen or (
                     isinstance(err, InlineAlignmentError)
                     and not isinstance(err, TranslationQualityError))
-                if self.cancel_request() or self.translator.match_error(str(err)):
+                if (self.cancel_request() or fatal_row_error(err)
+                        or (self.keep_unrecoverable_source is not True
+                            and self.translator.match_error(str(err)))):
                     raise TranslationCanceled(_('Translation canceled.'))
+                if self.keep_unrecoverable_source is True and last_kind is None:
+                    self.abort_count += 1
+                    raise TranslationFailed('Unclassified engine failure; source fallback refused: %s' % type(err).__name__) from err
                 if attempt + 1 >= strict_limit:
                     break
                 delay = (attempt + 1) * 5
@@ -319,41 +381,41 @@ class Translation:
             except Exception as err:
                 last_error = err
                 fatal_seen = fatal_seen or fatal_row_error(err)
+                last_kind = row_error_kind(err)
                 quality_seen = quality_seen or isinstance(err, TranslationQualityError)
                 protocol_seen = protocol_seen or (
                     isinstance(err, InlineAlignmentError)
                     and not isinstance(err, TranslationQualityError))
-                if self.cancel_request() or self.translator.match_error(str(err)):
+                if (self.cancel_request() or fatal_row_error(err)
+                        or (self.keep_unrecoverable_source is not True
+                            and self.translator.match_error(str(err)))):
                     raise TranslationCanceled(_('Translation canceled.'))
-        # Validation failure is terminal for this ROW, not a provider outage.
-        # Never let ten malformed rows cancel the remaining book queue.
-        last_is_protocol = (isinstance(last_error, InlineAlignmentError)
-                            and not isinstance(last_error, TranslationQualityError))
-        # A final timeout must not erase the earlier proven inline failure.
-        # Keep-source opt-in alone never permits pure outages or quality errors.
-        mixed_protocol_failure = (self.keep_unrecoverable_source is True
-                                  and protocol_seen and not quality_seen and not fatal_seen
-                                  and not isinstance(last_error, InlineAlignmentError))
-        protocol_failed = (last_is_protocol or mixed_protocol_failure) and not fatal_seen
+                if self.keep_unrecoverable_source is True and last_kind is None:
+                    self.abort_count += 1
+                    raise TranslationFailed('Unclassified engine failure; source fallback refused: %s' % type(err).__name__) from err
+        # Eligibility depends on the final understood failure, not the most
+        # permissive earlier attempt. Unknown/fatal errors already escaped above.
+        protocol_failed = last_kind == 'protocol' and not fatal_seen
         terminal_reason = None
         if self.keep_unrecoverable_source is True and not fatal_seen:
-            if quality_seen:
-                terminal_reason = 'quality_exhausted'
-            elif not protocol_failed and isinstance(last_error, (UnexpectedResult, TimeoutError, ConnectionError)):
-                terminal_reason = 'provider_response_exhausted'
+            terminal_reason = {
+                'quality': 'quality_exhausted',
+                'response': 'provider_response_exhausted',
+                'transport': 'provider_transport_exhausted',
+            }.get(last_kind)
         if terminal_reason:
             reason = terminal_reason
-        if protocol_failed and not terminal_reason:
+        elif protocol_failed:
             reason = ('placeholder_unrecoverable' if has_reserves
                       else 'inline_protocol_exhausted')
-        elif not terminal_reason:
+        else:
             self.abort_count += 1
         self.log('V2 terminal failure: ' + json.dumps({
             'row': row, 'reason': reason, 'requests': requests,
             'request_limit': self.inline_request_limit,
             'reserve_loss_seen': placeholder_failed,
             'protocol_seen': protocol_seen, 'quality_seen': quality_seen,
-            'last_error_type': type(last_error).__name__}), True)
+            'last_error_type': type(last_error).__name__, 'last_error_kind': last_kind}), True)
         message = (
             'V2 paragraph exhausted (%s; %s/%s requests); '
             'available legacy fallback failed: %s' % (
@@ -364,7 +426,7 @@ class Translation:
         error.failure_context = {
             'reason': reason, 'requests': requests, 'request_limit': self.inline_request_limit,
             'protocol_seen': protocol_seen, 'quality_seen': quality_seen,
-            'last_error_type': type(last_error).__name__,
+            'last_error_type': type(last_error).__name__, 'last_error_kind': last_kind,
         }
         raise error
 
@@ -418,6 +480,7 @@ class Translation:
                     'source_md5': paragraph.md5,
                     'original': paragraph.original,
                     'source_preview': paragraph.original[:60],
+                    'raw_sha256': hashlib.sha256(paragraph.raw.encode('utf-8')).hexdigest(),
                     'reason': error.reason,
                 }
             self.log('V2 retained failure row: ' + json.dumps({
@@ -563,6 +626,8 @@ class Translation:
                     if retained else _('Translation completed.')))
         if retained:
             message += ' 本書 %s 列保留原文；IDs: %s' % (source_summary['count'], source_summary['ids'])
+            if source_summary['job_only_ids']:
+                message += '；傳輸暫敗 IDs: %s（下次一般翻譯工作自動重試）' % source_summary['job_only_ids']
         self.log(message)
         self.progress(1, message)
 

@@ -1,4 +1,10 @@
 class UnexpectedResult(Exception):
+    """Engine wrapper; response_stage and exception chain identify provenance."""
+    pass
+
+
+class ResponseParseFailed(Exception):
+    """A received provider response did not satisfy its parser contract."""
     pass
 
 

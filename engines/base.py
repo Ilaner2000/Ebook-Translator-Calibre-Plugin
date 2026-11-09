@@ -195,6 +195,7 @@ class Base:
 
     def translate(self, content):
         response = None
+        response_stage = 'prepare'
         try:
             body = self.get_body(content)
             if self.inline_protocol:
@@ -209,6 +210,7 @@ class Base:
                 'timeout': int(self.request_timeout),
                 'raw_object': self.stream
             }
+            response_stage = 'request'
             if self.proxy_type == 'socks5' and self.proxy_host is not None \
                     and self.proxy_port is not None:
                 with socks_proxy(self.proxy_host, self.proxy_port):
@@ -218,6 +220,7 @@ class Base:
                 if self.proxy_type == 'http':
                     params['proxy_uri'] = self.proxy_uri
                 response = request(**params)
+            response_stage = 'parse'
             return self.get_result(response)
         except Exception as e:
             # Combine the error messages for investigation.
@@ -225,11 +228,18 @@ class Base:
             if not self.stream and isinstance(response, str):
                 error_message += '\n\n' + response
             # Swap a valid API key if necessary.
-            if self.need_swap_api_key(error_message) and self.swap_api_key():
+            # V2 payloads can contain page401/404 or parser column numbers.
+            # Preserve legacy key rotation outside V2; V2 requires actual HTTP
+            # exception provenance instead of scanning response/traceback text.
+            swap_message = str(e) if self.inline_protocol else error_message
+            can_swap = not self.inline_protocol or isinstance(e, HTTPError)
+            if can_swap and self.need_swap_api_key(swap_message) and self.swap_api_key():
                 return self.translate(content)
-            raise UnexpectedResult(
+            wrapped = UnexpectedResult(
                 _('Can not parse returned response. Raw data: {}')
                 .format('\n\n' + error_message))
+            wrapped.response_stage = response_stage
+            raise wrapped from e
 
     def get_endpoint(self):
         return self.endpoint

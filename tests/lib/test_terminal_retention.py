@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 from lxml import etree
 from ...lib.cache import TranslationCache, source_retention_matches
-from ...lib.exception import ParagraphProtocolFailed, TranslationFailed
+from ...lib.exception import ParagraphProtocolFailed, ParagraphTerminalFailed, TranslationFailed
 from ...lib.only_mode import InlineAlignmentError
 from . import test_keep_source as ks
 from . import test_inline_fallback as fb
@@ -17,26 +17,26 @@ SOURCE = 'An ⟦ET0O⟧important ⟦ET1O⟧note⟦ET1C⟧⟦ET0C⟧.'
 
 class TestMixedTerminal(unittest.TestCase):
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
-    def test_proven_inline_failures_survive_last_timeout_opt_in(self, _sleep):
+    def test_protocol_then_timeout_is_job_only_transport_opt_in(self, _sleep):
         worker, engine = retry.TestBoundedPlaceholderRetry().worker([BAD, BAD, TimeoutError('fallback')])
         worker.keep_unrecoverable_source = True
         p = retry.TestBoundedPlaceholderRetry().paragraph(SOURCE)
         with self.assertRaises(TranslationFailed) as caught: worker.translate_paragraph(p)
-        self.assertIsInstance(caught.exception, ParagraphProtocolFailed)
+        self.assertIsInstance(caught.exception, ParagraphTerminalFailed)
         self.assertTrue(p.keep_source)
-        self.assertEqual('inline_protocol_exhausted', p.failure_reason)
+        self.assertEqual('provider_transport_exhausted', p.failure_reason)
         self.assertEqual(3, engine.translate.call_count)
         self.assertEqual(0, worker.abort_count)
         self.assertTrue(p.failure_context['protocol_seen'])
         self.assertEqual('TimeoutError', p.failure_context['last_error_type'])
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
-    def test_reserve_protocol_then_timeout_keeps_placeholder_reason(self, _sleep):
+    def test_reserve_protocol_then_timeout_is_job_only_transport(self, _sleep):
         worker, engine = retry.TestBoundedPlaceholderRetry().worker([BAD, BAD, TimeoutError('fallback')])
         worker.keep_unrecoverable_source = True
         p = retry.TestBoundedPlaceholderRetry().paragraph(SOURCE + ' {{id_00000}}')
-        with self.assertRaises(ParagraphProtocolFailed): worker.translate_paragraph(p)
+        with self.assertRaises(ParagraphTerminalFailed): worker.translate_paragraph(p)
         self.assertTrue(p.keep_source)
-        self.assertEqual('placeholder_unrecoverable', p.failure_reason)
+        self.assertEqual('provider_transport_exhausted', p.failure_reason)
         self.assertIsNone(p.translation)
         self.assertEqual(3, engine.translate.call_count)
         self.assertTrue(p.failure_context['protocol_seen'])

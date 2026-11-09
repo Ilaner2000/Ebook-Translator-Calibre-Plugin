@@ -268,7 +268,15 @@ def retained_completion_notice(result):
         return ''
     ids = sorted({row['id'] for row in rows if isinstance(row, dict)
                   and type(row.get('id')) is int})
-    return (' 本書 %s 列保留原文；IDs: %s' % (len(ids), ids)) if ids else ''
+    if not ids:
+        return ''
+    message = ' 本書 %s 列保留原文；IDs: %s' % (len(ids), ids)
+    retry_ids = sorted({row['id'] for row in rows if isinstance(row, dict)
+                        and type(row.get('id')) is int
+                        and row.get('reason') == 'provider_transport_exhausted'})
+    if retry_ids:
+        message += '；傳輸暫敗 IDs: %s（下次一般翻譯工作自動重試）' % retry_ids
+    return message
 
 
 def convert_item(
