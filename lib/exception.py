@@ -14,11 +14,16 @@ class TranslationFailed(Exception):
     pass
 
 
-class ParagraphProtocolFailed(TranslationFailed):
-    """Terminal row validation failure; other rows may still be translated."""
+class ParagraphTerminalFailed(TranslationFailed):
+    """Typed, bounded row failure eligible for explicit source-only fallback."""
     def __init__(self, message, reason):
         super().__init__(message)
         self.reason = reason
+
+
+class ParagraphProtocolFailed(ParagraphTerminalFailed):
+    """Terminal inline/reserve validation failure."""
+    pass
 
 
 class TranslationCanceled(Exception):

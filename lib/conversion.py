@@ -137,7 +137,12 @@ def convert_book(
             retained = cache.get_paragraphs(list(translation.retained_sources))
             paragraphs.extend(p for p in retained if p.id not in present
                               and translation.retained_source(p))
-        translation.handle(paragraphs)
+        try:
+            translation.handle(paragraphs)
+        finally:
+            if getattr(translation, 'keep_unrecoverable_source', False) is True:
+                cache.set_info('only_v2_source_retained_summary', json.dumps(
+                    translation.retention_summary(paragraphs), ensure_ascii=False))
         element_handler.add_translations(paragraphs)
         apply_bilingual_prose_spacing(elements, oeb, opts, element_handler)
 
@@ -255,6 +260,17 @@ def extract_book(input_path, encoding):
         return elements
 
 
+def retained_completion_notice(result):
+    if not isinstance(result, dict):
+        return ''
+    rows = result.get('kept_source_paragraphs', [])
+    if not isinstance(rows, list):
+        return ''
+    ids = sorted({row['id'] for row in rows if isinstance(row, dict)
+                  and type(row.get('id')) is int})
+    return (' 本書 %s 列保留原文；IDs: %s' % (len(ids), ids)) if ids else ''
+
+
 def convert_item(
         ebook_title, input_path, output_path, source_lang, target_lang,
         cache_only, is_batch, format, encoding, direction, notification):
@@ -313,6 +329,8 @@ def convert_item(
         input_path, output_path, translation, element_handler, cache,
         debug_info, encoding, notification)
     cache.done()
+    return {'v2_unrecoverable_keep_source': translation.keep_unrecoverable_source is True,
+            'kept_source_paragraphs': translation.retained_source_manifest()}
 
 
 def translation_cache_identity(input_path, engine_name, target_lang, merge_length, encoding, handler):
@@ -830,6 +848,7 @@ class ConversionWorker:
                     job, dialog_title=_('Translation job failed'))
             return
 
+        completion_notice = retained_completion_notice(getattr(job, 'result', None))
         if isinstance(output_path, dict) and output_path.get('variants'):
             result = getattr(job, 'result', None)
             if isinstance(result, dict):
@@ -849,7 +868,7 @@ class ConversionWorker:
                         'restored.'), det_msg=traceback.format_exc(), show=True)
                 return
             self.gui.status_bar.show_message(
-                job.description + ' ' + _('completed'), 5000)
+                job.description + ' ' + _('completed') + completion_notice, 5000)
 
             def open_variant(payload):
                 payload('ebook-viewer', kwargs={
@@ -863,7 +882,7 @@ class ConversionWorker:
                     _('Ebook Translation Log'), _('Translation Completed'),
                     _('The translation variants for "{}" were completed. '
                       'Do you want to open the Chinese book?').format(
-                          ebook_title),
+                          ebook_title) + completion_notice,
                     log_is_file=True, icon=self.icon, auto_hide_after=10)
             return
 
@@ -912,7 +931,7 @@ class ConversionWorker:
             output_path = new_output_path
 
         self.gui.status_bar.show_message(
-            job.description + ' ' + _('completed'), 5000)
+            job.description + ' ' + _('completed') + completion_notice, 5000)
 
         def callback(payload):
             if ebook.input_format in extra_formats.keys():
@@ -928,5 +947,5 @@ class ConversionWorker:
                 job.log_path,
                 _('Ebook Translation Log'), _('Translation Completed'),
                 _('The translation of "{}" was completed. Do you want to '
-                  'open the book?').format(ebook_title),
+                  'open the book?').format(ebook_title) + completion_notice,
                 log_is_file=True, icon=self.icon, auto_hide_after=10)

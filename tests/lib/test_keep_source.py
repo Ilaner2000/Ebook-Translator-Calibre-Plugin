@@ -130,7 +130,9 @@ class TestKeepSource(unittest.TestCase):
         saved=[];logs=[]
         worker.set_callback(lambda p:saved.append((p.id,p.translation)))
         worker.set_logging(lambda message,error=False:logs.append(message))
-        worker.handle(paragraphs)
+        from ...lib.cache import Paragraph
+        filler = [Paragraph(i+10, str(i), '<p>Good</p>', 'Good', translation='成功') for i in range(8)]
+        worker.handle(paragraphs + filler)
         self.assertEqual(3,engine.translate.call_count)
         self.assertIsNone(paragraphs[0].translation)
         self.assertIn((0,None),saved)
@@ -153,15 +155,16 @@ class TestKeepSource(unittest.TestCase):
         self.assertFalse(worker.retained_source(restored))
 
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
-    def test_opt_in_does_not_bypass_quality_guard(self,_sleep):
+    def test_opt_in_never_uses_corrupt_quality_target_but_retains_source(self,_sleep):
         from . import test_placeholder_retry as retry_fixtures
         worker,engine=retry_fixtures.TestBoundedPlaceholderRetry().worker(['<0x80>']*3)
         worker.keep_unrecoverable_source=True
         root,handler,paragraphs=self.fixture()
         with self.assertRaises(TranslationFailed):worker.translate_paragraph(paragraphs[0])
-        self.assertFalse(paragraphs[0].keep_source)
-        self.assertEqual([],worker.retained_source_manifest())
-        self.assertEqual(1,worker.abort_count)
+        self.assertTrue(paragraphs[0].keep_source)
+        self.assertIsNone(paragraphs[0].translation)
+        self.assertEqual('quality_exhausted',paragraphs[0].failure_reason)
+        self.assertEqual(0,worker.abort_count)
 
     @patch('calibre_plugins.ebook_translator.lib.conversion.file_sha256',return_value='hash')
     def test_manifest_lists_retained_rows_and_job_result_reaches_store(self,_sha):

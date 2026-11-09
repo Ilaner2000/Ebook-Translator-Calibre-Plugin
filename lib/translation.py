@@ -15,13 +15,36 @@ from ..engines.custom import CustomTranslate
 from .utils import log, sep, trim, dummy, traceback_error
 from .config import get_config
 from .exception import (
-    TranslationFailed, TranslationCanceled, ParagraphProtocolFailed)
+    TranslationFailed, TranslationCanceled, ParagraphProtocolFailed,
+    ParagraphTerminalFailed, UnexpectedResult, UnsupportedModel)
 from .handler import Handler
 from .only_mode import InlineAlignmentError, TOKEN, validate_inline_translation
 from .translation_quality import normalize_translation, TranslationQualityError
 
 
 load_translations()  # type: ignore
+
+
+def fatal_row_error(error):
+    """Never source-retain authentication, unsupported configuration or fatal errors.
+
+    Base.translate wraps transport/parser errors in UnexpectedResult; inspect its
+    real exception chain as well as status text. Unknown exceptions remain hard
+    failures unless an earlier real protocol error established that narrow path.
+    """
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, (TranslationCanceled, UnsupportedModel, MemoryError,
+                              PermissionError, FileNotFoundError, NotImplementedError, SystemError)):
+            return True
+        status = getattr(error, 'code', None)
+        if type(status) is int and 400 <= status < 500:
+            return True
+        if re.search(r'(?i)\b(?:400|401|402|403|404|405|410|422|429|unauthorized|forbidden|fatal)\b|invalid api.?key|unsupported model|model not found', str(error)):
+            return True
+        error = error.__cause__ or error.__context__
+    return False
 
 
 class Glossary:
@@ -140,6 +163,15 @@ class Translation:
             'id', 'page', 'source_preview', 'reason')}
             for _key,row in sorted(self.retained_sources.items())]
 
+    def retention_summary(self, paragraphs):
+        required = {p.id: p for p in paragraphs if not p.ignored}
+        ids = sorted(p.id for p in required.values()
+                     if getattr(p, 'keep_source', False) is True and self.retained_source(p))
+        count, total = len(ids), len(required)
+        return {'count': count, 'ids': ids, 'required_rows': total,
+                'max_ratio': 0.10, 'ratio': count / total if total else 0.0,
+                'blocked': bool(total and count * 10 > total)}
+
     def set_fresh(self, fresh):
         self.fresh = fresh
 
@@ -227,6 +259,7 @@ class Translation:
         placeholder_failed = False
         protocol_seen = False
         quality_seen = False
+        fatal_seen = False
         requests = 0
         for attempt in range(strict_limit):
             if self.cancel_request() or (self.abort_count > 0 and self.need_stop()):
@@ -248,6 +281,7 @@ class Translation:
                 raise
             except Exception as err:
                 last_error = err
+                fatal_seen = fatal_seen or fatal_row_error(err)
                 quality_seen = quality_seen or isinstance(err, TranslationQualityError)
                 protocol_seen = protocol_seen or (
                     isinstance(err, InlineAlignmentError)
@@ -284,6 +318,7 @@ class Translation:
                 raise
             except Exception as err:
                 last_error = err
+                fatal_seen = fatal_seen or fatal_row_error(err)
                 quality_seen = quality_seen or isinstance(err, TranslationQualityError)
                 protocol_seen = protocol_seen or (
                     isinstance(err, InlineAlignmentError)
@@ -297,13 +332,21 @@ class Translation:
         # A final timeout must not erase the earlier proven inline failure.
         # Keep-source opt-in alone never permits pure outages or quality errors.
         mixed_protocol_failure = (self.keep_unrecoverable_source is True
-                                  and protocol_seen and not quality_seen
+                                  and protocol_seen and not quality_seen and not fatal_seen
                                   and not isinstance(last_error, InlineAlignmentError))
-        protocol_failed = last_is_protocol or mixed_protocol_failure
-        if protocol_failed:
+        protocol_failed = (last_is_protocol or mixed_protocol_failure) and not fatal_seen
+        terminal_reason = None
+        if self.keep_unrecoverable_source is True and not fatal_seen:
+            if quality_seen:
+                terminal_reason = 'quality_exhausted'
+            elif not protocol_failed and isinstance(last_error, (UnexpectedResult, TimeoutError, ConnectionError)):
+                terminal_reason = 'provider_response_exhausted'
+        if terminal_reason:
+            reason = terminal_reason
+        if protocol_failed and not terminal_reason:
             reason = ('placeholder_unrecoverable' if has_reserves
                       else 'inline_protocol_exhausted')
-        else:
+        elif not terminal_reason:
             self.abort_count += 1
         self.log('V2 terminal failure: ' + json.dumps({
             'row': row, 'reason': reason, 'requests': requests,
@@ -315,8 +358,9 @@ class Translation:
             'V2 paragraph exhausted (%s; %s/%s requests); '
             'available legacy fallback failed: %s' % (
                 reason, requests, self.inline_request_limit, last_error))
-        error = (ParagraphProtocolFailed(message, reason) if protocol_failed
-                 else TranslationFailed(message))
+        error = (ParagraphTerminalFailed(message, reason) if terminal_reason else
+                 ParagraphProtocolFailed(message, reason) if protocol_failed else
+                 TranslationFailed(message))
         error.failure_context = {
             'reason': reason, 'requests': requests, 'request_limit': self.inline_request_limit,
             'protocol_seen': protocol_seen, 'quality_seen': quality_seen,
@@ -363,7 +407,7 @@ class Translation:
         text = self.glossary.replace(paragraph.original)
         try:
             translation = self.translate_text(paragraph.row, text)
-        except ParagraphProtocolFailed as error:
+        except ParagraphTerminalFailed as error:
             paragraph.failure_context = getattr(error, 'failure_context', {})
             paragraph.failure_reason = error.reason
             paragraph.translation = None
@@ -499,6 +543,15 @@ class Translation:
             self.log('source retained summary: ' + json.dumps({
                 'count': len(retained), 'paragraphs': retained},
                 ensure_ascii=False))
+        source_summary = self.retention_summary(paragraphs)
+        if retained:
+            self.log('source retained count/IDs: ' + json.dumps(source_summary, ensure_ascii=False))
+        if source_summary['blocked']:
+            message = 'Source-retention limit exceeded: %s/%s rows (>10%%), IDs: %s' % (
+                source_summary['count'], source_summary['required_rows'], source_summary['ids'])
+            self.log(message, True)
+            self.progress(1, message)
+            raise TranslationFailed(message)
         if self.strict_inline and hasattr(self.translator, 'get_session_usage'):
             self.log('Provider token usage: ' + json.dumps(self.translator.get_session_usage(), sort_keys=True))
         blocked = any(getattr(p, 'failure_reason', None)
@@ -508,6 +561,8 @@ class Translation:
                      'output remains blocked.') if blocked else
                    (_('Translation completed with source paragraphs retained.')
                     if retained else _('Translation completed.')))
+        if retained:
+            message += ' 本書 %s 列保留原文；IDs: %s' % (source_summary['count'], source_summary['ids'])
         self.log(message)
         self.progress(1, message)
 

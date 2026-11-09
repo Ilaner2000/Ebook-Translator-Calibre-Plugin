@@ -74,7 +74,9 @@ class Paragraph:
 
 
 
-SOURCE_RETENTION_REASONS = ('placeholder_unrecoverable', 'inline_protocol_exhausted')
+SOURCE_RETENTION_REASONS = (
+    'placeholder_unrecoverable', 'inline_protocol_exhausted',
+    'quality_exhausted', 'provider_response_exhausted')
 
 
 def source_retention_matches(paragraph, record):

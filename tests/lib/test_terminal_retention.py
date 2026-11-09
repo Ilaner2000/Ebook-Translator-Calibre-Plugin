@@ -50,7 +50,7 @@ class TestMixedTerminal(unittest.TestCase):
         self.assertFalse(p.keep_source)
         self.assertEqual(1, worker.abort_count)
     @patch('calibre_plugins.ebook_translator.lib.translation.time.sleep')
-    def test_pure_outage_and_quality_corruption_never_become_retained(self, _sleep):
+    def test_opt_in_broad_policy_retains_exhausted_response_and_quality(self, _sleep):
         for responses in ([TimeoutError('offline')] * 3, [BAD, BAD, '<0x80>']):
             with self.subTest(responses=responses):
                 worker, _engine = retry.TestBoundedPlaceholderRetry().worker(responses)
@@ -58,8 +58,9 @@ class TestMixedTerminal(unittest.TestCase):
                 p = retry.TestBoundedPlaceholderRetry().paragraph(SOURCE)
                 with self.assertRaises(TranslationFailed) as caught: worker.translate_paragraph(p)
                 self.assertNotIsInstance(caught.exception, ParagraphProtocolFailed)
-                self.assertFalse(p.keep_source)
-                self.assertEqual([], worker.retained_source_manifest())
+                self.assertTrue(p.keep_source)
+                self.assertIsNone(p.translation)
+                self.assertEqual(1, len(worker.retained_source_manifest()))
 
 
 class TestNativeTerminalRecord(unittest.TestCase):
