@@ -5,6 +5,8 @@ identical copy; delivery verification must compare their SHA-256 values.
 """
 from __future__ import annotations
 import hashlib
+import importlib.util
+import shutil
 import html
 import json
 import os
@@ -14,7 +16,7 @@ import tempfile
 import time
 import uuid
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from html.parser import HTMLParser
@@ -154,9 +156,32 @@ def epub_facts(path):
         return {'languages': languages, 'latin': english, 'han': chinese,
                 'han_ratio': chinese/max(1,total), 'sha256': sha}
 
+def library_identity(library):
+    root=Path(library).resolve(strict=True)
+    with closing(sqlite3.connect((root/'metadata.db').as_uri()+'?mode=ro',uri=True)) as db:
+        return str(root),str(db.execute('SELECT uuid FROM library_id').fetchone()[0])
+
+
+def job_conflict(book, jobs):
+    for job in jobs:
+        if not isinstance(job,dict) or job.get('known') is not True:
+            return 'Calibre 有身分未能核實的舊工作；請先核對並等候結束'
+        if job['library_uuid']==book['library_uuid'] and (job['book_uuid']==book['uuid'] or job['book_id']==book['id']):
+            return '這本書或同書號的前一版本仍在 Calibre 翻譯中'
+    return ''
+
+
+def historical_target(root,library,book_id,prior_id):
+    prior=request_record(root,prior_id)
+    path,lid=library_identity(library)
+    if not prior or prior['library_uuid']!=lid or prior['library_path']!=path or prior['book_id']!=book_id:
+        raise BridgeError('舊要求不屬於這個書庫與原始目標')
+    return {'id':prior['book_id'],'uuid':prior['book_uuid'],'library_uuid':lid,'library_path':path}
+
+
 def snapshot(library, book_id):
     root = Path(library).resolve(strict=True)
-    with sqlite3.connect((root/'metadata.db').as_uri()+'?mode=ro', uri=True) as db:
+    with closing(sqlite3.connect((root/'metadata.db').as_uri()+'?mode=ro', uri=True)) as db:
         db.row_factory = sqlite3.Row
         row = db.execute('SELECT id,title,uuid,path FROM books WHERE id=?', (int(book_id),)).fetchone()
         if row is None:
@@ -192,7 +217,7 @@ def verified_variants(book):
     # the translated record, linked by the original's UUID (not title guessing).
     main_paths={book['id']:book.get('epub')}
     library=Path(book['library_path'])
-    with sqlite3.connect((library/'metadata.db').as_uri()+'?mode=ro',uri=True) as db:
+    with closing(sqlite3.connect((library/'metadata.db').as_uri()+'?mode=ro',uri=True)) as db:
         related=db.execute("SELECT DISTINCT b.id,b.path FROM books b JOIN identifiers i ON i.book=b.id WHERE i.type='ebook-translator-source' AND i.val=?",(book['uuid'],)).fetchall()
         for bid,relative in related:
             other=inside(library,relative)
@@ -204,7 +229,11 @@ def verified_variants(book):
         m = read_json(p)
         if not isinstance(m,dict):
             raise BridgeError('翻譯 manifest 無法讀取')
-        if str(m.get('source_uuid')) != book['uuid'] and book['id'] not in (m.get('derivative_book_ids') or {}).values():
+        is_source=str(m.get('source_uuid'))==book['uuid']
+        is_derivative=(book['id']!=m.get('source_book_id') and
+                       book['id'] in (m.get('derivative_book_ids') or {}).values() and
+                       book['identifiers'].get('ebook-translator-source')==str(m.get('source_uuid')))
+        if not (is_source or is_derivative):
             raise BridgeError('翻譯 manifest 與書籍身分不符')
         if not (is_zh(m.get('target_language_code')) or re.search(r'chinese|中文|繁體|简体|簡體',str(m.get('target_language','')),re.I)):
             continue
@@ -233,7 +262,45 @@ def verified_variants(book):
             raise BridgeError('翻譯紀錄存在，但中譯／雙語檔缺失或 SHA 不符')
     return results
 
-def availability(book):
+def note_paths(library, h2o_root, book):
+    if h2o_root is None or not Path(h2o_root).is_dir(): raise BridgeError('H2O 目錄尚未設定或無法存取，未猜測落點')
+    root=Path(h2o_root).resolve()
+    pattern=re.compile(r'^[ \t]*-[ \t]*Source[ \t]*::.*?calibre://(?:show|view)-book/([^/)]+)/(\d+)',re.I|re.M)
+    out=[]
+    for p in root.glob('R.*.md'):
+        p.resolve().relative_to(root)
+        m=pattern.search(p.read_text(encoding='utf-8'))
+        if m and int(m.group(2))==book['id']:
+            library_name=m.group(1)
+            if library_name.startswith('_hex_-'): library_name=bytes.fromhex(library_name[6:]).decode('utf-8')
+            if library_name!=Path(library).name: raise BridgeError('H2O Source 指向另一個書庫，未猜測落點')
+            out.append(p)
+    if len(out)>1: raise BridgeError('本書有多份 H2O；請先指定版本，不猜落點')
+    return out
+
+
+def note_plan(library,h2o_root,book):
+    paths=note_paths(library,h2o_root,book)
+    if paths:
+        p=paths[0]
+        return {'kind':'h2o','path':str(p.resolve()),'label':p.name,'before_sha256':file_hash(p),
+                'identity_limit':'舊 Source 只有書庫名稱與書號，沒有 UUID；請核對這是本書筆記'}
+    return {'kind':'comments','label':'Calibre 簡介最前方','before_sha256':digest((book['comments'] or '').encode()),'identity_limit':''}
+
+
+def relation_token(book,plan):
+    return digest(json.dumps({'book_token':confirmation_token(book),'destination':plan},ensure_ascii=False,sort_keys=True).encode())
+
+
+def default_note_writer(path,before,after):
+    primitive=Path(__file__).with_name('migrate_h2o_kangxi_s796.py')
+    if not primitive.is_file(): raise BridgeError('未設定既有 H2O GuardedWrite primitive')
+    spec=importlib.util.spec_from_file_location('_wasn_s975_note_atomic',primitive)
+    module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+    return module.atomic_replace(Path(path),before,after)
+
+
+def availability(book, note_root=None):
     facts=book.get('facts')
     base={'book_id':book['id'],'book_uuid':book['uuid'],'library_uuid':book['library_uuid'],
           'title':book['title'],'can_translate':False,'can_archive':False}
@@ -241,6 +308,16 @@ def availability(book):
         return dict(base,state=state,reason=reason,**more)
     confirmed=[r for r in book['relations']['relations'] if r.get('decision')=='same' and r.get('library_uuid')==book['library_uuid']]
     if confirmed:
+        for record in confirmed:
+            visible=record.get('visible')
+            if not visible: continue
+            if visible['kind']=='comments': actual=(book['comments'] or '').encode()
+            else:
+                if note_root is None: return result('uncertain','版本關係的 H2O 目前無法核對，請檢查或撤銷本側記錄')
+                p=Path(visible['path']).resolve();p.relative_to(Path(note_root).resolve())
+                actual=p.read_bytes() if p.exists() else b''
+            if actual.count(visible['inserted'].encode())!=1:
+                return result('uncertain','版本關係的可見行已被修改或移除，請核對或撤銷本側記錄')
         chinese=bool(facts and facts['han']>=50 and facts['han_ratio']>.2)
         label='已確認英文原書：' if chinese else '已確認中文版：'
         return result('chinese' if chinese else 'translated',label+ '、'.join(f"{r['peer_title']}（#{r['peer_id']}）" for r in confirmed))
@@ -260,17 +337,17 @@ def availability(book):
     langs=book['languages']+(facts['languages'] if facts else [])
     if facts and facts['han']>=50 and facts['han_ratio']>.2:
         return result('chinese','中文書，無需翻譯')
+    if not facts:
+        return result('unsupported','格式未支援：目前整本翻譯入口支援 EPUB；本書無 EPUB')
     if any(is_zh(v) for v in langs):
         return result('uncertain','中文語言標記與可驗證內文不一致，請先核對')
-    if not facts:
-        return result('unsupported','目前整本翻譯入口支援 EPUB；本書無 EPUB')
     if facts['han']>50 and facts['han_ratio']>.015:
         return result('uncertain','內文含可觀中文，可能已有譯文，請先核對')
     if facts['latin']<200 or not any(lang(v) in ('en','eng','en-us','en-gb') for v in langs):
         return result('uncertain','無法確認為英文原書，請先核對語言')
     return result('eligible','英文原書，尚未找到本書譯本',can_translate=True,source_sha256=facts['sha256'])
 
-def candidates(library, book):
+def candidates(library, book, note_root=None):
     """Suggestions only: even an exact source UUID is shown for confirmation."""
     omitted={r.get('peer_uuid') for r in book['relations']['relations'] if r.get('decision') in ('different','same')}
     normalized=lambda s: re.sub(r'[^\w]','',s.lower())
@@ -278,7 +355,7 @@ def candidates(library, book):
     authors={normalized(a) for a in book['authors']}
     out=[]
     root=Path(library)
-    with sqlite3.connect((root/'metadata.db').as_uri()+'?mode=ro',uri=True) as db:
+    with closing(sqlite3.connect((root/'metadata.db').as_uri()+'?mode=ro',uri=True)) as db:
         rows=db.execute('''SELECT DISTINCT b.id,b.uuid,b.title,COALESCE(c.text,'') FROM books b JOIN books_languages_link bl ON bl.book=b.id JOIN languages l ON l.id=bl.lang_code LEFT JOIN comments c ON c.book=b.id WHERE l.lang_code IN ('zho','chi','zh','zh_CN','zh_TW') AND b.id!=?''',(book['id'],)).fetchall()
         authors_by_id={}
         for bid,author in db.execute('SELECT ba.book,a.name FROM books_authors_link ba JOIN authors a ON a.id=ba.author'):
@@ -312,12 +389,21 @@ def candidates(library, book):
             if same_author and (title_in_comments or title_in_epub):
                 reasons.append('作者相同，'+('書介' if title_in_comments else 'EPUB 前置頁')+'含英文原書名')
             if reasons: out.append({'id':bid,'uuid':buid,'title':name,'reasons':reasons})
-    return sorted(out,key=lambda r:(-len(r['reasons']),r['id']))[:12]
+    displayed=[]
+    for item in sorted(out,key=lambda r:(-len(r['reasons']),r['id']))[:12]:
+        peer=snapshot(library,item['id'])
+        if peer['uuid']!=item['uuid'] or peer['title']!=item['title'] or not chinese_peer(peer): continue
+        if note_root is not None:
+            plan=note_plan(library,note_root,peer)
+            item['destination']=plan;item['peer_token']=relation_token(peer,plan)
+        else: item['peer_token']=confirmation_token(peer)
+        displayed.append(item)
+    return displayed
 
-def public_state(library, book_id):
+def public_state(library, book_id, note_root=None):
     try:
         book=snapshot(library,book_id)
-        state=availability(book)
+        state=availability(book,note_root=note_root)
         archived=state.pop('archive',None)
         if archived:
             state['archive_preview']={'source':book['epub'],'source_sha256':state['source_sha256'],
@@ -326,8 +412,12 @@ def public_state(library, book_id):
                 'new_main_sha256':archived['manifest']['sha256']['bilingual'],
                 'source_relative':Path(book['epub']).relative_to(book['directory']).as_posix(),
                 'new_main_relative':Path(archived['roles']['bilingual']).relative_to(book['directory']).as_posix()}
-        state['candidates']=candidates(library,book) if state['state']=='eligible' else []
+        state['candidates']=candidates(library,book,note_root=note_root) if state['state']=='eligible' else []
         state['relations']=book['relations']['relations']
+        state['source_token']=confirmation_token(book)
+        if note_root is not None:
+            plan=note_plan(library,note_root,book)
+            state['destination']=plan;state['relation_source_token']=relation_token(book,plan)
         return state
     except (OSError,ValueError,KeyError,RuntimeError,sqlite3.Error,zipfile.BadZipFile,ET.ParseError) as exc:
         return {'book_id':book_id,'state':'uncertain','can_translate':False,'can_archive':False,'reason':str(exc)}
@@ -338,7 +428,7 @@ def bridge_health(root, book):
                0 <= time.time()-float(hb.get('at',0)) < 15)
     return {'connected':connected,'ready':connected and hb.get('ready') is True,
             'reason':('' if hb.get('ready') else hb.get('reason','請先設定翻譯引擎')) if connected else '翻譯外掛橋接未連線',
-            'instance':hb.get('instance'),'pid':hb.get('pid'),'manual_jobs':hb.get('manual_jobs',[])}
+            'instance':hb.get('instance'),'pid':hb.get('pid'),'manual_jobs':hb.get('manual_jobs',[]),'h2o_root':hb.get('h2o_root')}
 
 
 def requests(root):
@@ -347,6 +437,42 @@ def requests(root):
         if not isinstance(req,dict) or req.get('schema')!=SCHEMA:
             raise BridgeError('橋接佇列資料損壞')
         yield p,req
+
+
+def request_record(root,rid):
+    return read_json(Path(root)/'requests'/(rid+'.json')) or read_json(Path(root)/'history'/(rid+'.json'))
+
+
+def write_request(root,req):
+    root=Path(root)
+    if req.get('state') in TERMINAL:
+        atomic_json(root/'history'/(req['id']+'.json'),req)
+        (root/'requests'/(req['id']+'.json')).unlink(missing_ok=True)
+    else: atomic_json(root/'requests'/(req['id']+'.json'),req)
+
+
+def maintain(root, backup_root=None, now=None):
+    now=time.time() if now is None else now
+    for p in (Path(root)/'history').glob('*.json'):
+        value=read_json(p)
+        if value.get('state') in TERMINAL and now-value.get('updated_at',now)>90*86400:p.unlink()
+    if backup_root:
+        for p in Path(backup_root).glob('*/manifest.json'):
+            if not re.fullmatch('[a-f0-9]{32}',p.parent.name): continue
+            value=read_json(p);resolved=value.get('resolved_at')
+            req=request_record(root,p.parent.name)
+            if resolved and now-resolved>=30*86400 and (not req or req.get('state') in TERMINAL):
+                base=Path(backup_root).resolve();target=p.parent.resolve()
+                relative=target.relative_to(base)
+                if len(relative.parts)!=1 or relative.name!=p.parent.name: raise BridgeError('備份清理路徑超出預定根，未刪除')
+                shutil.rmtree(target)
+
+
+def mark_conflict_resolved(backup_root,rid,*,acknowledged=False):
+    if acknowledged is not True or not re.fullmatch('[a-f0-9]{32}',rid): raise BridgeError('必須先明示核對並解決備份衝突')
+    p=Path(backup_root)/rid/'manifest.json';value=read_json(p)
+    if not value: raise BridgeError('找不到衝突備份')
+    value['resolved_at']=time.time();atomic_json(p,value)
 
 
 def process_alive(pid):
@@ -383,13 +509,28 @@ def request_view(root, req, health):
     return value
 
 
-def peer_evidence(book):
+def book_evidence(book):
     # Bind both displayed identity and content; language metadata alone cannot
     # establish a Chinese edition. A relation record is not recursive evidence.
     facts=book.get('facts')
-    return {'uuid':book['uuid'],'title':book['title'],'languages':book['languages'],
+    return {'library_uuid':book['library_uuid'],'library_path':book['library_path'],
+            'uuid':book['uuid'],'title':book['title'],'authors':sorted(book['authors']),'languages':sorted(book['languages']),
             'sha256':facts['sha256'] if facts else None,
             'epub_languages':facts['languages'] if facts else []}
+
+
+def confirmation_token(book):
+    manifests=[]
+    for p in sorted((Path(book['directory'])/'data'/'translation-variants').glob('*/manifest.json')):
+        manifests.append((p.relative_to(book['directory']).as_posix(),file_hash(p)))
+    value={'book':book_evidence(book),'comments_sha256':digest((book['comments'] or '').encode()),
+           'tags':sorted(book['tags']),'identifiers':book['identifiers'],'relations':book['relations'],
+           'manifests':manifests}
+    return digest(json.dumps(value,ensure_ascii=False,sort_keys=True).encode())
+
+
+# Kept as a named compatibility helper for diagnostic probes.
+peer_evidence=book_evidence
 
 
 def chinese_peer(book):
@@ -398,16 +539,24 @@ def chinese_peer(book):
     return any(any(role in v['roles'] for role in ('translation','bilingual')) for v in verified_variants(book))
 
 
-def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_policy=None, peer_id=None, decision=None, request_id=None, pair_id=None, prior_request_id=None):
+def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_policy=None, peer_id=None, decision=None, request_id=None, pair_id=None, prior_request_id=None, source_token=None, peer_token=None):
     if operation not in ('translate','archive','relation','undo_relation','reconcile'):
         raise BridgeError('未知操作')
     # EPUB parsing and hashing must never hold the cross-process queue lock.
-    book=snapshot(library,book_id)
-    state=availability(book)
+    if operation=='reconcile':
+        if not re.fullmatch('[a-f0-9]{32}',prior_request_id or ''): raise BridgeError('待核對要求 ID 無效')
+        book=historical_target(root,library,book_id,prior_request_id);state={}
+    else:
+        book=snapshot(library,book_id);state=availability(book,note_root=read_json(Path(root)/'heartbeat.json',{}).get('h2o_root'))
+        source_plan=note_plan(library,read_json(Path(root)/'heartbeat.json',{}).get('h2o_root'),book) if operation=='relation' else None
+        expected=relation_token(book,source_plan) if operation=='relation' else confirmation_token(book)
+        if operation in ('translate','archive','relation') and source_token!=expected:
+            raise BridgeError('待核對：畫面所確認的原書或落點已變更或缺少確認證據，請重新開啟')
     health=bridge_health(root,book)
     if not health['connected']: raise BridgeError(health['reason'])
     if operation=='translate' and not health['ready']: raise BridgeError(health['reason'])
-    if book_id in health['manual_jobs']: raise BridgeError('這本書已在 Calibre 翻譯中')
+    conflict=job_conflict(book,health['manual_jobs'])
+    if conflict: raise BridgeError(conflict)
     if operation=='translate' and not state['can_translate']: raise BridgeError(state['reason'])
     if operation=='archive' and not state['can_archive']: raise BridgeError(state['reason'])
     if operation in ('translate','archive') and source_sha256 != state.get('source_sha256'):
@@ -419,7 +568,10 @@ def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_po
         if type(peer_id) is not int or peer_id<=0 or peer_id==book_id or decision not in ('same','different'):
             raise BridgeError('版本配對選項無效')
         peer=snapshot(library,peer_id)
-        if peer_id in health['manual_jobs']: raise BridgeError('對照書已在 Calibre 翻譯中')
+        conflict=job_conflict(peer,health['manual_jobs'])
+        if conflict: raise BridgeError(conflict)
+        peer_plan=note_plan(library,health['h2o_root'],peer)
+        if peer_token!=relation_token(peer,peer_plan): raise BridgeError('待核對：畫面所確認的對照版本或落點已變更')
         if decision=='same' and not chinese_peer(peer): raise BridgeError('無法驗證對照書為中文版，請先核對')
     active_uuids={book['uuid']} | ({peer['uuid']} if peer else set())
     rid=request_id or uuid.uuid4().hex
@@ -427,10 +579,13 @@ def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_po
     if operation=='reconcile' and not re.fullmatch('[a-f0-9]{32}',prior_request_id or ''):
         raise BridgeError('待核對要求 ID 無效')
     with serial(root):
-        for _,old in requests(root):
+        queue=list(requests(root))
+        historical=read_json(Path(root)/'history'/(rid+'.json'))
+        if historical: queue.append((None,historical))
+        for _,old in queue:
             if old['id']==rid:
                 if (old['library_uuid']!=book['library_uuid'] or old['book_uuid']!=book['uuid'] or old['operation']!=operation or
-                    any(old.get(k)!=v for k,v in {'source_sha256':source_sha256,'reading_policy':reading_policy,'peer_id':peer_id,'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id}.items())):
+                    any(old.get(k)!=v for k,v in {'source_sha256':source_sha256,'reading_policy':reading_policy,'peer_id':peer_id,'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id,'source_token':source_token,'peer_token':peer_token}.items())):
                     raise BridgeError('request ID 衝突')
                 return request_view(root,old,health)
             if old['library_uuid']!=book['library_uuid']: continue
@@ -447,31 +602,37 @@ def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_po
              'book_ids':sorted({book_id} | ({peer_id} if peer else set())),
              'source_sha256':source_sha256,'reading_policy':reading_policy,
              'peer_id':peer_id,'peer_uuid':peer['uuid'] if peer else None,'peer_evidence':peer_evidence(peer) if peer else None,
-             'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id}
+             'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id,
+             'source_token':source_token,'peer_token':peer_token,
+             'source_evidence':book_evidence(book) if operation!='reconcile' else None,
+             'note_plans':{'source':source_plan,'peer':peer_plan} if operation=='relation' else None}
         atomic_json(Path(root)/'requests'/(rid+'.json'),req)
         return req
 
 class Consumer:
     """Called only on the Calibre Qt main thread; API process only enqueues."""
-    def __init__(self, root, library, api, start_translation, *, h2o_root=None, readiness=None, manual_jobs=None):
+    def __init__(self, root, library, api, start_translation, *, h2o_root=None, readiness=None, manual_jobs=None, note_writer=None, backup_root=None):
         self.root=Path(root); self.root.mkdir(parents=True,exist_ok=True)
         self.library=Path(library).resolve(); self.api=api
         self.start_translation=start_translation; self.h2o_root=Path(h2o_root).resolve() if h2o_root else None
         self.readiness=readiness or (lambda: (True,''))
         self.manual_jobs=manual_jobs or (lambda: [])
+        self.note_writer=note_writer or default_note_writer
+        self.backup_root=Path(backup_root) if backup_root else None
+        self.last_maintenance=0
         self.instance=uuid.uuid4().hex
-        with sqlite3.connect((self.library/'metadata.db').as_uri()+'?mode=ro',uri=True) as db:
+        with closing(sqlite3.connect((self.library/'metadata.db').as_uri()+'?mode=ro',uri=True)) as db:
             self.library_uuid=str(db.execute('SELECT uuid FROM library_id').fetchone()[0])
         self.last_heartbeat=0
 
     def heartbeat(self):
         ready,reason=self.readiness()
         atomic_json(self.root/'heartbeat.json',{'schema':SCHEMA,'library_uuid':self.library_uuid,'at':time.time(),
-                    'instance':self.instance,'pid':os.getpid(),'ready':ready,'reason':reason,'manual_jobs':self.manual_jobs()})
+                    'instance':self.instance,'pid':os.getpid(),'h2o_root':str(self.h2o_root) if self.h2o_root else None,'ready':ready,'reason':reason,'manual_jobs':self.manual_jobs()})
 
     def update(self, req, state, **fields):
         req.update(state=state,updated_at=time.time(),**fields)
-        atomic_json(self.root/'requests'/(req['id']+'.json'),req)
+        write_request(self.root,req)
 
     def event(self, req, state, **fields):
         # A callback must not wait for the queue lock after a GUI job or storage
@@ -483,26 +644,31 @@ class Consumer:
         self.event(req,'completed' if success else 'failed',detail=detail)
 
     def reconcile(self, req, book):
-        old=read_json(self.root/'requests'/(req['prior_request_id']+'.json'))
+        old=request_record(self.root,req['prior_request_id'])
         if (not old or old['library_uuid']!=book['library_uuid'] or old['book_uuid']!=book['uuid'] or
             old['instance']==self.instance): raise BridgeError('舊要求身分不符或仍屬目前工作擁有者')
         old=request_view(self.root,old,bridge_health(self.root,book))
         if old['state']!='needs_reconciliation': raise BridgeError('舊要求已有結果，請重新整理')
-        if set(old['book_ids']).intersection(self.manual_jobs()): raise BridgeError('Calibre 仍有相關翻譯工作，不能解除')
+        jobs=self.manual_jobs()
+        for bid,buid in [(old['book_id'],old['book_uuid'])]+([(old['peer_id'],old['peer_uuid'])] if old.get('peer_uuid') else []):
+            conflict=job_conflict({'id':bid,'uuid':buid,'library_uuid':old['library_uuid']},jobs)
+            if conflict: raise BridgeError(conflict)
         alive=process_alive(old.get('owner_pid'))
         if old.get('owner_pid')!=os.getpid() and alive is not False:
             raise BridgeError('原 Calibre 程序仍在執行或無法證明已結束，保留鎖定')
-        self.update(old,'interrupted',detail='使用者已核對；目前無相關 GUI 工作，舊程序已結束或同程序已確認無工作。未自動重送',resolved_by=req['id'])
+        self.update(old,'interrupted',detail='使用者已核對，舊要求已解除；未自動重送。請另外核對可能的部分寫入；解除不代表已回復版本關係或資料',resolved_by=req['id'])
 
     def tick(self):
         self.heartbeat()
+        if time.time()-self.last_maintenance>3600:
+            maintain(self.root,self.backup_root);self.last_maintenance=time.time()
         try:
             with serial(self.root):
                 for p in (self.root/'outcomes').glob('*.json'):
                     event=read_json(p)
-                    old=read_json(self.root/'requests'/p.name)
+                    old=request_record(self.root,p.stem)
                     if old and event.get('instance')==old.get('instance'):
-                        atomic_json(self.root/'requests'/p.name,event)
+                        write_request(self.root,event)
                         p.unlink()
                 for _,old in requests(self.root):
                     if old['library_uuid']==self.library_uuid and old['instance']!=self.instance and old.get('state') in {'starting','running','storing'}:
@@ -517,11 +683,20 @@ class Consumer:
         except BridgeError:
             return  # Busy queue: Qt retries next tick, never invents a failure.
         try:
+            if req['operation']=='reconcile':
+                book=historical_target(self.root,self.library,req['book_id'],req['prior_request_id'])
+                with serial(self.root): self.reconcile(req,book)
+                self.finish(req,True,'舊要求已核對解除；部分寫入仍需核對，未自動重送')
+                return
             book=snapshot(self.library,req['book_id'])
             if (book['library_uuid']!=req['library_uuid'] or book['uuid']!=req['book_uuid'] or
                 str(self.library)!=req['library_path']):
                 raise BridgeError('目前書庫或書籍身分與要求不符')
-            if set(req['book_ids']).intersection(self.manual_jobs()): raise BridgeError('Calibre 已有相關翻譯 job')
+            conflict=job_conflict(book,self.manual_jobs())
+            if conflict: raise BridgeError(conflict)
+            expected=relation_token(book,note_plan(self.library,self.h2o_root,book)) if req['operation']=='relation' else confirmation_token(book)
+            if req['operation'] in ('translate','archive','relation') and expected!=req['source_token']:
+                raise BridgeError('待核對：原書的已確認內容、落點或版本資產已變更，未啟動')
             op=req['operation']
             if op=='translate':
                 ready,reason=self.readiness()
@@ -532,6 +707,8 @@ class Consumer:
                 if not st['can_'+op]: raise BridgeError(st['reason'])
             if op=='translate':
                 def done(success,detail=''): self.finish(req,success,detail)
+                done.bridge_root=self.root
+                done.deferred=lambda:self.event(req,'storing',detail='翻譯已完成，等候 Calibre 對話框關閉後存回')
                 done.storing=lambda:self.event(req,'storing',detail='翻譯已完成，正在存回 Calibre')
                 job=self.start_translation(req,book,done)
                 if job is None: raise BridgeError('外掛未建立 GUI job')
@@ -542,16 +719,15 @@ class Consumer:
                 self.finish(req,True,'英文原檔已收進 Data，雙語版已成主 EPUB')
             elif op=='relation':
                 peer=snapshot(self.library,req['peer_id'])
-                if peer_evidence(peer)!=req['peer_evidence']: raise BridgeError('對照版本的身分、語言或內文已變更，請重新核對')
+                if relation_token(peer,note_plan(self.library,self.h2o_root,peer))!=req['peer_token'] or book_evidence(peer)!=req['peer_evidence']: raise BridgeError('待核對：對照版本、落點或 before_sha 已變更，未寫入')
+                conflict=job_conflict(peer,self.manual_jobs())
+                if conflict: raise BridgeError(conflict)
                 if req['decision']=='same' and not chinese_peer(peer): raise BridgeError('對照書已無可驗證中文版，未寫入')
-                self.relation(book,peer,req['decision'])
+                self.relation(book,peer,req['decision'],expected_plans=req['note_plans'])
                 self.finish(req,True,'兩側版本關係已記錄，可各自撤銷')
             elif op=='undo_relation':
                 self.undo_relation(book,req.get('pair_id'))
                 self.finish(req,True,'本側版本關係已撤銷，其他內容保留')
-            elif op=='reconcile':
-                with serial(self.root): self.reconcile(req,book)
-                self.finish(req,True,'舊要求已核對解除；請重新開啟書籍，依目前版本決定下一步')
             else: raise BridgeError('未知操作')
         except Exception as exc:
             self.finish(req,False,str(exc))
@@ -611,22 +787,7 @@ class Consumer:
                 raise
 
     def h2o_paths(self,book):
-        if self.h2o_root is None: raise BridgeError('尚未設定 H2O 目錄，不能決定版本關係落點')
-        if not self.h2o_root.is_dir(): raise BridgeError('H2O 目錄無法存取')
-        pattern=re.compile(r'^[ \t]*-[ \t]*Source[ \t]*::.*?calibre://(?:show|view)-book/([^/)]+)/(\d+)',re.I|re.M)
-        out=[]
-        for p in self.h2o_root.glob('R.*.md'):
-            p.resolve().relative_to(self.h2o_root)
-            m=pattern.search(p.read_text(encoding='utf-8'))
-            if m and int(m.group(2))==book['id']:
-                library_name=m.group(1)
-                if library_name.startswith('_hex_-'):
-                    library_name=bytes.fromhex(library_name[6:]).decode('utf-8')
-                if library_name!=self.library.name:
-                    raise BridgeError('H2O Source 指向另一個書庫，未寫入')
-                out.append(p)
-        if len(out)>1: raise BridgeError('本書有多份 H2O；請先指定版本，不猜落點')
-        return out
+        return note_paths(self.library,self.h2o_root,book)
 
     def visible_plan(self,book,peer,pair_id):
         paths=self.h2o_paths(book)
@@ -662,22 +823,22 @@ class Consumer:
         else:
             path=Path(plan['path'])
             if path.read_bytes()!=expected: raise BridgeError('H2O 已變更，未覆寫')
-            # Exclusive OS lock serialises this bridge's writes; compare-before
-            # atomic-replace refuses changed text instead of replaying a backup.
-            fd,tmp=tempfile.mkstemp(prefix='.'+path.name,dir=path.parent)
-            try:
-                with os.fdopen(fd,'wb') as f: f.write(new); f.flush(); os.fsync(f.fileno())
-                if path.read_bytes()!=expected: raise BridgeError('H2O 寫入前已變更')
-                os.replace(tmp,path)
-            finally:
-                if os.path.exists(tmp): os.unlink(tmp)
+            # Reuse ai_highlight GuardedWrite's reviewed S796 atomic primitive.
+            # Only this exact myNote patch is supplied, never regenerate highlights.
+            try: self.note_writer(path,expected,new)
+            except Exception as exc: raise BridgeError('待核對：H2O 雜湊或寫入驗證不符，請核對外部編輯與版本關係行') from exc
+            if path.read_bytes()!=new or digest(path.read_bytes())!=digest(new):
+                raise BridgeError('H2O after_sha256 不符，請核對')
 
     def save_relations(self,book,value):
         value=dict(value,library_uuid=book['library_uuid'],book_uuid=book['uuid'])
         self.add_data(book['id'],RELFILE,json.dumps(value,ensure_ascii=False,indent=2).encode('utf-8'))
 
-    def relation(self,book,peer,decision):
+    def relation(self,book,peer,decision,expected_plans=None):
         pair_id=digest((book['library_uuid']+':'+':'.join(sorted([book['uuid'],peer['uuid']]))).encode())[:24]
+        if expected_plans is not None:
+            actual={'source':note_plan(self.library,self.h2o_root,book),'peer':note_plan(self.library,self.h2o_root,peer)}
+            if actual!=expected_plans: raise BridgeError('待核對：版本關係落點或before_sha已變更，未寫入')
         plans=[]
         for current,other in ((book,peer),(peer,book)):
             old=current['relations']
@@ -724,12 +885,14 @@ class Consumer:
                 p=Path(visible['path']).resolve()
                 if self.h2o_root is None: raise BridgeError('H2O 路徑未設定')
                 p.relative_to(self.h2o_root)
-                current=p.read_bytes()
+                current=p.read_bytes() if p.exists() else b''
             else: current=str(self.api.field_for('comments',book['id']) or '').encode('utf-8')
             needle=visible['inserted'].encode('utf-8')
-            if current.count(needle)!=1: raise BridgeError('工具版本關係行已變更，未動其他內容')
-            new=current.replace(needle,b'',1)
-            self.write_visible(book,visible,current,new)
+            if current.count(needle)>1: raise BridgeError('工具版本關係行不唯一，未動其他內容')
+            if current.count(needle)==1:
+                new=current.replace(needle,b'',1)
+                self.write_visible(book,visible,current,new)
+            else: visible=None  # Already removed/edited: clear only our Data record.
         try:
             self.save_relations(book,dict(book['relations'],relations=[r for r in book['relations']['relations'] if r.get('pair_id')!=pair_id]))
         except Exception:

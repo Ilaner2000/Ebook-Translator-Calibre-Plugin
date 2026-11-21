@@ -17,6 +17,8 @@ defaults: dict[str, Any] = {
     # Set at deployment to wasn_paths.RUNTIME_TMP_DIR / 'ebook-translator-bridge'.
     'remote_bridge_root': None,
     'remote_h2o_root': None,
+    'remote_conflict_root': None,
+    'remote_note_guard_path': None,
     'to_library': True,
     'output_path': None,
     'translate_engine': None,

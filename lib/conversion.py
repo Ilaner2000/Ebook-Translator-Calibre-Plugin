@@ -449,7 +449,24 @@ class ConversionWorker:
         self.api = self.db.new_api
         self.working_jobs = self.gui.bookfere_ebook_translator.jobs
 
+    def _job_identity(self, ebook):
+        if ebook.id is None: return None
+        try:
+            from .remote_core import library_identity
+            path,lid=library_identity(self.db.library_path)
+            buid=self.api.field_for('uuid',ebook.id)
+            if not isinstance(buid,str) or not buid: raise ValueError('missing book UUID')
+            return {'known':True,'library_uuid':lid,'library_path':path,'book_id':int(ebook.id),'book_uuid':buid}
+        except Exception:
+            # Never relabel an unbound/legacy job using the current GUI library.
+            return {'known':False,'book_id':int(ebook.id)}
+
+    def _register_job(self, job, ebook, payload, identity):
+        job.wasn_source_identity=identity
+        self.working_jobs[job]=(ebook,payload)
+
     def translate_ebook(self, ebook, cache_only=False, is_batch=False):
+        owner=self._job_identity(ebook)
         input_path = ebook.get_input_path()
         if self.config.get('translation_variants_enabled', False) and \
                 self.config.get('to_library'):
@@ -477,11 +494,12 @@ class ConversionWorker:
                  ebook.encoding, ebook.target_direction)),
             description=(_('[{} > {}] Translating "{}"').format(
                 ebook.source_lang, ebook.target_lang, ebook.title)))
-        self.working_jobs[job] = (ebook, output_path)
+        self._register_job(job,ebook,output_path,owner)
 
     def translate_variants(
             self, ebook, input_path, cache_only=False, is_batch=False,
-            reading_policy=None, interactive=True):
+            reading_policy=None, interactive=True, expected_source_sha256=None):
+        owner=self._job_identity(ebook)
         scope_is_valid = (
             self.config.get('to_library') and ebook.id is not None and
             ebook.input_format.lower() == 'epub' and
@@ -536,6 +554,8 @@ class ConversionWorker:
             uuid4().hex[:8])
         try:
             source_snapshot = temporary_copy(input_path, '.source.epub')
+            if expected_source_sha256 is not None and file_sha256(source_snapshot)!=expected_source_sha256:
+                raise ValueError('Source changed while staging the immutable provider input')
             translation_path = temporary_path('.translation.epub')
             bilingual_path = temporary_path('.bilingual.epub')
         except Exception:
@@ -553,14 +573,14 @@ class ConversionWorker:
             args=(
                 'calibre_plugins.ebook_translator.lib.conversion',
                 'convert_variants_item',
-                (ebook.title, input_path, translation_path, bilingual_path,
+                (ebook.title, source_snapshot if not interactive else input_path, translation_path, bilingual_path,
                  ebook.source_lang, ebook.target_lang, cache_only, is_batch,
                  ebook.input_format, ebook.encoding,
                  ebook.target_direction,
                  self.config.get('translation_variant_gap', 1.0))),
             description=(_('[{} > {}] Translating variants for "{}"').format(
                 ebook.source_lang, ebook.target_lang, ebook.title)))
-        self.working_jobs[job] = (ebook, {
+        self._register_job(job, ebook, {
             'variants': True,
             'source_path': source_snapshot,
             'translation_path': translation_path,
@@ -569,7 +589,7 @@ class ConversionWorker:
             'effective_storage': effective_storage,
             'main_variant': self._variant_main(),
             'run_id': run_id,
-        })
+        },owner)
         return job
 
     def _prepare_variant_metadata(

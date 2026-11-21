@@ -13,8 +13,10 @@ module_name = 'calibre_plugins.ebook_translator.batch'
 
 class TestBatchTranslation(unittest.TestCase):
     def setUp(self) -> None:
-        self.app = QApplication([])
-        self.app.is_dark_theme = False
+        self.owns_app = QApplication.instance() is None
+        self.app = QApplication.instance() or QApplication([])
+        if self.owns_app:
+            self.app.is_dark_theme = False
         self.parent = QWidget()
 
         self.mock_woker = Mock(ConversionWorker)
@@ -85,5 +87,6 @@ class TestBatchTranslation(unittest.TestCase):
         mock_done.assert_called_once_with(0)
 
     def tearDown(self):
-        self.app.quit()
+        if self.owns_app:
+            self.app.quit()
         del self.app
