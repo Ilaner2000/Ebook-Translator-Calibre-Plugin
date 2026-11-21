@@ -762,8 +762,8 @@ class Consumer:
                 self.relation(book,peer,req['decision'],expected_plans=req['note_plans'])
                 self.finish(req,True,'兩側版本關係已記錄，可各自撤銷')
             elif op=='undo_relation':
-                self.undo_relation(book,req.get('pair_id'))
-                self.finish(req,True,'本側版本關係已撤銷，其他內容保留')
+                removed=self.undo_relation(book,req.get('pair_id'))
+                self.finish(req,True,'本側版本關係已撤銷，其他內容保留' if removed else '僅撤銷本側內部關係；原版本行缺失或改過，請人工核對，筆記／簡介未改')
             else: raise BridgeError('未知操作')
         except Exception as exc:
             self.finish(req,False,str(exc))
@@ -925,7 +925,7 @@ class Consumer:
         records=[r for r in book['relations']['relations'] if r.get('pair_id')==pair_id]
         if len(records)!=1: raise BridgeError('找不到唯一的本側版本關係')
         rec=records[0]; visible=rec.get('visible')
-        current=None; new=None
+        current=None; new=None; visible_removed=not visible
         if visible:
             if visible['kind']=='h2o':
                 if self.h2o_root is None: raise BridgeError('H2O 路徑未設定')
@@ -934,9 +934,15 @@ class Consumer:
                 needle=visible['inserted'].encode('utf-8')
                 marker=('wasn-version-pair:'+pair_id).encode()
                 marked=[]
+                own_sources={path.resolve() for path in paths}
                 for candidate in self.h2o_root.rglob('*.md'):
-                    candidate.resolve().relative_to(self.h2o_root)
-                    if marker in candidate.read_bytes():marked.append(candidate.resolve())
+                    resolved=candidate.resolve();resolved.relative_to(self.h2o_root)
+                    raw=candidate.read_bytes()
+                    # Both sides legitimately share pair_id but have distinct
+                    # directional inserted lines and Source identities. Count
+                    # our exact line anywhere, plus edited markers in our own
+                    # Source note; never mistake the peer's line for our copy.
+                    if marker in raw and (needle in raw or resolved in own_sources):marked.append(resolved)
                 if len(marked)>1: raise BridgeError('待核對：工具版本行不唯一，未清理任何筆記或內部記錄')
                 if marked:
                     p=marked[0]
@@ -953,10 +959,18 @@ class Consumer:
             if current.count(needle)>1: raise BridgeError('工具版本關係行不唯一，未動其他內容')
             if current.count(needle)==1:
                 new=current.replace(needle,b'',1)
-                self.write_visible(book,visible,current,new)
-            else: visible=None  # Already removed/edited: clear only our Data record.
+                self.write_visible(book,visible,current,new);visible_removed=True
+            else:
+                # An edited HTML pair-id may remove the exact marker while
+                # leaving the visible relationship row. Do not call it removed.
+                plain=re.sub(rb'<!--.*?-->',b'',needle).strip()
+                target=('Calibre #'+str(rec['peer_id'])).encode()
+                if visible['kind']=='h2o' and (plain in current or any('版本關係'.encode() in line and target in line for line in current.splitlines())):
+                    raise BridgeError('待核對：版本行仍在但工具標記已改，未刪內部記錄')
+                visible=None  # Explicit Data-only result, never a clean-visible-row claim.
         try:
             self.save_relations(book,dict(book['relations'],relations=[r for r in book['relations']['relations'] if r.get('pair_id')!=pair_id]))
         except Exception:
             if visible: self.write_visible(book,visible,new,current)
             raise
+        return visible_removed
