@@ -14,7 +14,9 @@ from ..engines import (
 
 defaults: dict[str, Any] = {
     'preferred_mode': None,
-    # Set at deployment to wasn_paths.RUNTIME_TMP_DIR / 'ebook-translator-bridge'.
+    # Deployment: SCRATCHPAD_ROOT / 'ebook-translator-bridge' (never runtime-tmp).
+    # H2O: VAULT_ROOT/05-H2O; conflicts: WASN_TOOLS_BACKUPS_ROOT/ebook-translator-conflicts.
+    # note guard: absolute Scripts-ByAI/migrate_h2o_kangxi_s796.py (existing atomic primitive).
     'remote_bridge_root': None,
     'remote_h2o_root': None,
     'remote_conflict_root': None,

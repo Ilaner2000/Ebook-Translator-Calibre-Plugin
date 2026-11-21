@@ -195,6 +195,12 @@ def snapshot(library, book_id):
         cm = db.execute('SELECT text FROM comments WHERE book=?',(book_id,)).fetchone()
         book['comments'] = cm[0] if cm else ''
         formats = list(db.execute('SELECT format,name FROM data WHERE book=?',(book_id,)))
+        try:
+            count=db.execute('SELECT count(*) FROM annotations WHERE book=?',(book_id,)).fetchone()[0]
+            positions=db.execute("SELECT count(*) FROM last_read_positions WHERE book=? AND upper(format)='EPUB'",(book_id,)).fetchone()[0]
+            book['reading_assets']={'known':True,'annotations':count,'last_read_positions':positions}
+        except sqlite3.Error:
+            book['reading_assets']={'known':False,'annotations':None,'last_read_positions':None}
     directory = inside(root, book['path'])
     book['directory'] = str(directory)
     book['library_path'] = str(root)
@@ -210,23 +216,28 @@ def snapshot(library, book_id):
     return book
 
 def verified_variants(book):
+    if '_verified_graph' in book: return book['_verified_graph']
     results=[]
     directory = Path(book['directory'])
     manifests=list((directory/'data'/'translation-variants').glob('*/manifest.json'))
     # Older linked_pair layouts keep the manifest and bilingual attachment on
     # the translated record, linked by the original's UUID (not title guessing).
     main_paths={book['id']:book.get('epub')}
+    owners={book['id']:{'book_id':book['id'],'book_uuid':book['uuid'],'title':book['title'],'directory':book['directory']}}
     library=Path(book['library_path'])
     with closing(sqlite3.connect((library/'metadata.db').as_uri()+'?mode=ro',uri=True)) as db:
-        related=db.execute("SELECT DISTINCT b.id,b.path FROM books b JOIN identifiers i ON i.book=b.id WHERE i.type='ebook-translator-source' AND i.val=?",(book['uuid'],)).fetchall()
-        for bid,relative in related:
+        related=db.execute("SELECT DISTINCT b.id,b.path,b.uuid,b.title FROM books b JOIN identifiers i ON i.book=b.id WHERE i.type='ebook-translator-source' AND i.val=?",(book['uuid'],)).fetchall()
+        for bid,relative,buid,title in related:
             other=inside(library,relative)
+            owners[bid]={'book_id':bid,'book_uuid':buid,'title':title,'directory':str(other)}
             manifests.extend((other/'data'/'translation-variants').glob('*/manifest.json'))
             fmt=db.execute("SELECT name FROM data WHERE book=? AND upper(format)='EPUB'",(bid,)).fetchall()
             if len(fmt)==1: main_paths[bid]=str(inside(other,fmt[0][0]+'.epub'))
+    book['_linked_owners']=[owners[key] for key in sorted(owners) if key!=book['id']]
     for p in sorted(set(manifests)):
         p.resolve().relative_to(library)
-        m = read_json(p)
+        manifest_raw=p.read_bytes()
+        m=json.loads(manifest_raw)
         if not isinstance(m,dict):
             raise BridgeError('翻譯 manifest 無法讀取')
         is_source=str(m.get('source_uuid'))==book['uuid']
@@ -257,19 +268,21 @@ def verified_variants(book):
                 if other_main and file_hash(other_main)==expected:
                     roles[role]=other_main
         if 'translation' in roles or 'bilingual' in roles:
-            results.append({'manifest':m,'manifest_path':str(p),'roles':roles})
+            results.append({'manifest':m,'manifest_path':str(p),'manifest_sha256':digest(manifest_raw),'roles':roles,
+                            'owners':[owners[key] for key in sorted(owners)]})
         else:
             raise BridgeError('翻譯紀錄存在，但中譯／雙語檔缺失或 SHA 不符')
+    book['_verified_graph']=results
     return results
 
-def note_paths(library, h2o_root, book):
+def note_paths(library, h2o_root, book, pattern='*.md'):
     if h2o_root is None or not Path(h2o_root).is_dir(): raise BridgeError('H2O 目錄尚未設定或無法存取，未猜測落點')
     root=Path(h2o_root).resolve()
-    pattern=re.compile(r'^[ \t]*-[ \t]*Source[ \t]*::.*?calibre://(?:show|view)-book/([^/)]+)/(\d+)',re.I|re.M)
+    source_pattern=re.compile(r'^[ \t]*-[ \t]*Source[ \t]*::.*?calibre://(?:show|view)-book/([^/)]+)/(\d+)',re.I|re.M)
     out=[]
-    for p in root.glob('R.*.md'):
+    for p in root.rglob(pattern):
         p.resolve().relative_to(root)
-        m=pattern.search(p.read_text(encoding='utf-8'))
+        m=source_pattern.search(p.read_text(encoding='utf-8'))
         if m and int(m.group(2))==book['id']:
             library_name=m.group(1)
             if library_name.startswith('_hex_-'): library_name=bytes.fromhex(library_name[6:]).decode('utf-8')
@@ -322,12 +335,16 @@ def availability(book, note_root=None):
         label='已確認英文原書：' if chinese else '已確認中文版：'
         return result('chinese' if chinese else 'translated',label+ '、'.join(f"{r['peer_title']}（#{r['peer_id']}）" for r in confirmed))
     variants=verified_variants(book)
+    if not variants and book.get('_linked_owners'): return result('uncertain','找到另存版本的來源 UUID 標記，但缺可驗證版本紀錄，請先核對')
     if facts:
+        retained=[v for v in variants if (v['manifest'].get('effective_storage') or v['manifest'].get('requested_storage')) in ('linked_pair','three_records') and v['manifest'].get('source_uuid')==book['uuid'] and v['manifest']['sha256'].get('source')==facts['sha256']]
+        if retained: return result('translated','英文主檔已刻意保留，已有另存譯本；不再提供翻譯或整理',source_sha256=facts['sha256'])
         archive=[v for v in variants if 'bilingual' in v['roles'] and v['manifest']['sha256'].get('source')==facts['sha256']]
         if len(archive)==1:
             v=archive[0]
             return result('archive','英文原檔仍為主檔；已有可驗證雙語版，可整理原檔',can_archive=True,
-                          source_sha256=facts['sha256'],archive=v)
+                          source_sha256=facts['sha256'],archive=v,reading_assets=book['reading_assets'],
+                          requires_reading_consent=(not book['reading_assets']['known'] or bool(book['reading_assets']['annotations'] or book['reading_assets']['last_read_positions'])))
         if variants:
             return result('translated','已有可驗證的中譯／雙語 EPUB',source_sha256=facts['sha256'])
     tags=set(book['tags'])
@@ -406,12 +423,16 @@ def public_state(library, book_id, note_root=None):
         state=availability(book,note_root=note_root)
         archived=state.pop('archive',None)
         if archived:
+            asset=Path(archived['roles']['bilingual'])
+            owner=next((item for item in archived['owners'] if asset.is_relative_to(Path(item['directory']))),None)
+            compact=asset.relative_to(Path(owner['directory'])).as_posix() if owner else '書庫內：'+asset.relative_to(Path(library).resolve()).as_posix()
+            if owner and owner['book_id']!=book['id']: compact=f"書籍 #{owner['book_id']}："+compact
             state['archive_preview']={'source':book['epub'],'source_sha256':state['source_sha256'],
                 'destination':'data/translation-variants/<本次新建目錄>/source.epub',
                 'new_main':archived['roles']['bilingual'],
                 'new_main_sha256':archived['manifest']['sha256']['bilingual'],
                 'source_relative':Path(book['epub']).relative_to(book['directory']).as_posix(),
-                'new_main_relative':Path(archived['roles']['bilingual']).relative_to(book['directory']).as_posix()}
+                'new_main_relative':compact,'new_main_owner':owner}
         state['candidates']=candidates(library,book,note_root=note_root) if state['state']=='eligible' else []
         state['relations']=book['relations']['relations']
         state['source_token']=confirmation_token(book)
@@ -520,12 +541,20 @@ def book_evidence(book):
 
 
 def confirmation_token(book):
-    manifests=[]
-    for p in sorted((Path(book['directory'])/'data'/'translation-variants').glob('*/manifest.json')):
-        manifests.append((p.relative_to(book['directory']).as_posix(),file_hash(p)))
+    # The exact graph used for availability/preview is frozen on this snapshot.
+    # Never reread a different valid graph while minting its display token.
+    root=Path(book['library_path']).resolve()
+    graph=[]
+    for variant in verified_variants(book):
+        graph.append({'manifest':Path(variant['manifest_path']).relative_to(root).as_posix(),
+                      'manifest_sha256':variant['manifest_sha256'],
+                      'owners':[dict(owner,directory=Path(owner['directory']).relative_to(root).as_posix()) for owner in variant['owners']],
+                      'roles':{role:{'path':Path(path).relative_to(root).as_posix(),'sha256':variant['manifest']['sha256'][role]}
+                               for role,path in sorted(variant['roles'].items())}})
     value={'book':book_evidence(book),'comments_sha256':digest((book['comments'] or '').encode()),
            'tags':sorted(book['tags']),'identifiers':book['identifiers'],'relations':book['relations'],
-           'manifests':manifests}
+           'verified_asset_graph':graph,'reading_assets':book['reading_assets'],
+           'linked_records':[dict(owner,directory=Path(owner['directory']).relative_to(root).as_posix()) for owner in book.get('_linked_owners',[])]}
     return digest(json.dumps(value,ensure_ascii=False,sort_keys=True).encode())
 
 
@@ -539,7 +568,8 @@ def chinese_peer(book):
     return any(any(role in v['roles'] for role in ('translation','bilingual')) for v in verified_variants(book))
 
 
-def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_policy=None, peer_id=None, decision=None, request_id=None, pair_id=None, prior_request_id=None, source_token=None, peer_token=None):
+def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_policy=None, peer_id=None, decision=None, request_id=None, pair_id=None, prior_request_id=None, source_token=None, peer_token=None, reading_consent=False):
+    if type(reading_consent) is not bool: raise BridgeError('替換主檔同意值必須是明確布林')
     if operation not in ('translate','archive','relation','undo_relation','reconcile'):
         raise BridgeError('未知操作')
     # EPUB parsing and hashing must never hold the cross-process queue lock.
@@ -559,6 +589,7 @@ def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_po
     if conflict: raise BridgeError(conflict)
     if operation=='translate' and not state['can_translate']: raise BridgeError(state['reason'])
     if operation=='archive' and not state['can_archive']: raise BridgeError(state['reason'])
+    if operation=='archive' and state.get('requires_reading_consent') and not reading_consent: raise BridgeError('有畫線、閱讀進度或無法核實；須在裝置明示同意替換主檔')
     if operation in ('translate','archive') and source_sha256 != state.get('source_sha256'):
         raise BridgeError('原書已變更，請重新開啟詳細頁')
     if operation=='translate' and reading_policy not in ('linked_pair','replace_main'):
@@ -585,7 +616,7 @@ def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_po
         for _,old in queue:
             if old['id']==rid:
                 if (old['library_uuid']!=book['library_uuid'] or old['book_uuid']!=book['uuid'] or old['operation']!=operation or
-                    any(old.get(k)!=v for k,v in {'source_sha256':source_sha256,'reading_policy':reading_policy,'peer_id':peer_id,'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id,'source_token':source_token,'peer_token':peer_token}.items())):
+                    any(old.get(k)!=v for k,v in {'source_sha256':source_sha256,'reading_policy':reading_policy,'peer_id':peer_id,'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id,'source_token':source_token,'peer_token':peer_token,'reading_consent':reading_consent}.items())):
                     raise BridgeError('request ID 衝突')
                 return request_view(root,old,health)
             if old['library_uuid']!=book['library_uuid']: continue
@@ -603,7 +634,7 @@ def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_po
              'source_sha256':source_sha256,'reading_policy':reading_policy,
              'peer_id':peer_id,'peer_uuid':peer['uuid'] if peer else None,'peer_evidence':peer_evidence(peer) if peer else None,
              'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id,
-             'source_token':source_token,'peer_token':peer_token,
+             'source_token':source_token,'peer_token':peer_token,'reading_consent':reading_consent,
              'source_evidence':book_evidence(book) if operation!='reconcile' else None,
              'note_plans':{'source':source_plan,'peer':peer_plan} if operation=='relation' else None}
         atomic_json(Path(root)/'requests'/(rid+'.json'),req)
@@ -677,11 +708,16 @@ class Consumer:
                 if pending is None: return
                 _,req=pending
                 if req['instance']!=self.instance or time.time()>req['expires_at']:
-                    self.update(req,'rejected',detail='外掛世代已變更或要求已逾期；未啟動')
+                    detail='外掛世代已變更；未啟動' if req['instance']!=self.instance else '要求已逾期（Calibre 對話框或手動流程可能尚未結束）；未啟動'
+                    self.update(req,'rejected',detail=detail)
                     return
                 self.update(req,'starting')
-        except BridgeError:
-            return  # Busy queue: Qt retries next tick, never invents a failure.
+        except BridgeError as exc:
+            if str(exc)!='橋接忙碌，請稍後再試':
+                heartbeat=read_json(self.root/'heartbeat.json',{})
+                heartbeat.update(ready=False,reason=str(exc))
+                atomic_json(self.root/'heartbeat.json',heartbeat)
+            return  # Busy lock retries; corrupt queue is visible in heartbeat.
         try:
             if req['operation']=='reconcile':
                 book=historical_target(self.root,self.library,req['book_id'],req['prior_request_id'])
@@ -715,7 +751,7 @@ class Consumer:
                 if req['state'] not in TERMINAL:
                     self.event(req,'running',job_id=str(getattr(job,'id','')),detail='Calibre GUI job 已建立')
             elif op=='archive':
-                self.archive(book,st['archive'])
+                self.archive(book,st['archive'],reading_consent=req.get('reading_consent',False))
                 self.finish(req,True,'英文原檔已收進 Data，雙語版已成主 EPUB')
             elif op=='relation':
                 peer=snapshot(self.library,req['peer_id'])
@@ -741,7 +777,17 @@ class Consumer:
             if relpath not in stored or stored[relpath].read_bytes()!=data:
                 raise BridgeError('Calibre Data 寫入後驗證失敗')
 
-    def archive(self,book,variant):
+    def archive(self,book,variant,*,reading_consent=False):
+        if (variant['manifest'].get('effective_storage') or variant['manifest'].get('requested_storage')) in ('linked_pair','three_records'):
+            raise BridgeError('英文主檔已刻意保留；不提供整理')
+        try:
+            count=self.api.annotation_count_for_book(book['id'])
+            positions=self.api.get_last_read_positions(book['id'],fmt='EPUB',limit=1)
+            if type(count) is not int or not isinstance(positions,(list,tuple)): raise ValueError('reading assets unknown')
+            needs_consent=count>0 or bool(positions)
+        except Exception: needs_consent=True
+        if needs_consent and reading_consent is not True:
+            raise BridgeError('待核對：Calibre 有畫線/進度或無法證明沒有，未替換主檔；請先明示同意')
         # The existing bundle_data sequence: preserve+verify source, replace,
         # verify, then mark. Never filesystem-move/delete a library file.
         source=Path(book['epub']); bilingual=Path(variant['roles']['bilingual'])
@@ -882,10 +928,26 @@ class Consumer:
         current=None; new=None
         if visible:
             if visible['kind']=='h2o':
-                p=Path(visible['path']).resolve()
                 if self.h2o_root is None: raise BridgeError('H2O 路徑未設定')
-                p.relative_to(self.h2o_root)
-                current=p.read_bytes() if p.exists() else b''
+                original=Path(visible['path']).resolve();original.relative_to(self.h2o_root)
+                paths=note_paths(self.library,self.h2o_root,book,pattern='*.md')
+                needle=visible['inserted'].encode('utf-8')
+                marker=('wasn-version-pair:'+pair_id).encode()
+                marked=[]
+                for candidate in self.h2o_root.rglob('*.md'):
+                    candidate.resolve().relative_to(self.h2o_root)
+                    if marker in candidate.read_bytes():marked.append(candidate.resolve())
+                if len(marked)>1: raise BridgeError('待核對：工具版本行不唯一，未清理任何筆記或內部記錄')
+                if marked:
+                    p=marked[0]
+                    if p not in [path.resolve() for path in paths]: raise BridgeError('待核對：工具行的 Source 已變更，未猜測筆記身分')
+                    current=p.read_bytes()
+                    if current.count(needle)!=1: raise BridgeError('待核對：工具版本行已由人工修改，未刪內部記錄')
+                    visible=dict(visible,path=str(p))
+                else:
+                    if not original.is_file(): raise BridgeError('待核對：原筆記已移走或刪除，無法證明可見行已撤銷')
+                    if original not in [path.resolve() for path in paths]: raise BridgeError('待核對：原筆記的 Source 已變更')
+                    current=original.read_bytes()
             else: current=str(self.api.field_for('comments',book['id']) or '').encode('utf-8')
             needle=visible['inserted'].encode('utf-8')
             if current.count(needle)>1: raise BridgeError('工具版本關係行不唯一，未動其他內容')
