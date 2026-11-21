@@ -18,3 +18,6 @@ foreman and must wait until no translation job is active.
 The companion Scripts docs/s975/README.md records original dispatch, copied
 real-library tests, actual queued GUI-job proof, fixtures and pending live /
 provider / physical-device / AY acceptance. No full-book completion is claimed.
+
+
+R2: canonical core byte equality is also preserved on fresh Windows checkout by the targeted .gitattributes LF rule. Durable per-request outcomes let Qt completion/running/storage events avoid contention with the API queue lock; next tick drains them. New ownership is needs_reconciliation, never automatic replay or proof of death. The authenticated explicit reconcile action requires no affected GUI jobs and either verified prior process exit or same-process job-list proof. A live/unknown other PID keeps the lock. Default bridge settings remain unset. Full findings and evidence: Scripts candidate docs/s975/README.md R2 section.

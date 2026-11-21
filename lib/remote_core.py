@@ -20,8 +20,8 @@ from xml.etree import ElementTree as ET
 from html.parser import HTMLParser
 
 SCHEMA = 1
-ACTIVE = {'queued', 'starting', 'running', 'storing'}
-TERMINAL = {'completed', 'failed', 'rejected'}
+ACTIVE = {'queued', 'starting', 'running', 'storing', 'needs_reconciliation'}
+TERMINAL = {'completed', 'failed', 'rejected', 'interrupted'}
 RELFILE = 'data/wasn-version-relations.json'
 CHINESE = {'zh', 'zho', 'chi', 'zh-cn', 'zh-tw', 'zh-hans', 'zh-hant'}
 
@@ -241,7 +241,9 @@ def availability(book):
         return dict(base,state=state,reason=reason,**more)
     confirmed=[r for r in book['relations']['relations'] if r.get('decision')=='same' and r.get('library_uuid')==book['library_uuid']]
     if confirmed:
-        return result('translated','已確認中文版：'+ '、'.join(f"{r['peer_title']}（#{r['peer_id']}）" for r in confirmed))
+        chinese=bool(facts and facts['han']>=50 and facts['han_ratio']>.2)
+        label='已確認英文原書：' if chinese else '已確認中文版：'
+        return result('chinese' if chinese else 'translated',label+ '、'.join(f"{r['peer_title']}（#{r['peer_id']}）" for r in confirmed))
     variants=verified_variants(book)
     if facts:
         archive=[v for v in variants if 'bilingual' in v['roles'] and v['manifest']['sha256'].get('source')==facts['sha256']]
@@ -256,8 +258,10 @@ def availability(book):
     if marked:
         return result('translated','已有中譯／雙語標記，停止重複翻譯（舊書附件仍需人工核對）')
     langs=book['languages']+(facts['languages'] if facts else [])
-    if any(is_zh(v) for v in langs) or (facts and facts['han']>=50 and facts['han_ratio']>.2):
+    if facts and facts['han']>=50 and facts['han_ratio']>.2:
         return result('chinese','中文書，無需翻譯')
+    if any(is_zh(v) for v in langs):
+        return result('uncertain','中文語言標記與可驗證內文不一致，請先核對')
     if not facts:
         return result('unsupported','目前整本翻譯入口支援 EPUB；本書無 EPUB')
     if facts['han']>50 and facts['han_ratio']>.015:
@@ -319,7 +323,9 @@ def public_state(library, book_id):
             state['archive_preview']={'source':book['epub'],'source_sha256':state['source_sha256'],
                 'destination':'data/translation-variants/<本次新建目錄>/source.epub',
                 'new_main':archived['roles']['bilingual'],
-                'new_main_sha256':archived['manifest']['sha256']['bilingual']}
+                'new_main_sha256':archived['manifest']['sha256']['bilingual'],
+                'source_relative':Path(book['epub']).relative_to(book['directory']).as_posix(),
+                'new_main_relative':Path(archived['roles']['bilingual']).relative_to(book['directory']).as_posix()}
         state['candidates']=candidates(library,book) if state['state']=='eligible' else []
         state['relations']=book['relations']['relations']
         return state
@@ -328,10 +334,12 @@ def public_state(library, book_id):
 
 def bridge_health(root, book):
     hb=read_json(Path(root)/'heartbeat.json',{})
-    valid=(hb.get('schema')==SCHEMA and hb.get('library_uuid')==book.get('library_uuid') and
-           time.time()-float(hb.get('at',0)) < 15 and hb.get('ready') is True)
-    return {'ready':valid,'reason':hb.get('reason','翻譯外掛橋接尚未上線') if not valid else '',
-            'instance':hb.get('instance'), 'manual_jobs':hb.get('manual_jobs',[])}
+    connected=(hb.get('schema')==SCHEMA and hb.get('library_uuid')==book.get('library_uuid') and
+               0 <= time.time()-float(hb.get('at',0)) < 15)
+    return {'connected':connected,'ready':connected and hb.get('ready') is True,
+            'reason':('' if hb.get('ready') else hb.get('reason','請先設定翻譯引擎')) if connected else '翻譯外掛橋接未連線',
+            'instance':hb.get('instance'),'pid':hb.get('pid'),'manual_jobs':hb.get('manual_jobs',[])}
+
 
 def requests(root):
     for p in sorted((Path(root)/'requests').glob('*.json')):
@@ -340,44 +348,106 @@ def requests(root):
             raise BridgeError('橋接佇列資料損壞')
         yield p,req
 
-def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_policy=None, peer_id=None, decision=None, request_id=None, pair_id=None):
-    if operation not in ('translate','archive','relation','undo_relation'):
+
+def process_alive(pid):
+    """Conservative three-state liveness. Never use os.kill on Windows."""
+    if type(pid) is not int or pid<=0: return None
+    if pid==os.getpid(): return True
+    if os.name=='nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+        kernel.OpenProcess.argtypes=(wintypes.DWORD,wintypes.BOOL,wintypes.DWORD)
+        kernel.OpenProcess.restype=wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes=(wintypes.HANDLE,wintypes.DWORD)
+        kernel.CloseHandle.argtypes=(wintypes.HANDLE,)
+        handle=kernel.OpenProcess(0x00100000,False,pid)  # SYNCHRONIZE only
+        if not handle: return False if ctypes.get_last_error()==87 else None
+        try:
+            result=kernel.WaitForSingleObject(handle,0)
+            return {0:False,258:True}.get(result)
+        finally: kernel.CloseHandle(handle)
+    try: os.kill(pid,0); return True
+    except ProcessLookupError: return False
+    except PermissionError: return None
+
+
+def request_view(root, req, health):
+    value=dict(req)
+    event=read_json(Path(root)/'outcomes'/(req['id']+'.json'))
+    if event and event.get('instance')==req.get('instance'):
+        value.update(event)
+    if value.get('state') in {'starting','running','storing','needs_reconciliation'}:
+        if not health['connected'] or health['instance']!=value.get('instance'):
+            value.update(state='needs_reconciliation',detail='原工作擁有者未連線；請核對 Calibre 工作，不會自動重送')
+    return value
+
+
+def peer_evidence(book):
+    # Bind both displayed identity and content; language metadata alone cannot
+    # establish a Chinese edition. A relation record is not recursive evidence.
+    facts=book.get('facts')
+    return {'uuid':book['uuid'],'title':book['title'],'languages':book['languages'],
+            'sha256':facts['sha256'] if facts else None,
+            'epub_languages':facts['languages'] if facts else []}
+
+
+def chinese_peer(book):
+    facts=book.get('facts')
+    if facts and facts['han']>=50 and facts['han_ratio']>.2: return True
+    return any(any(role in v['roles'] for role in ('translation','bilingual')) for v in verified_variants(book))
+
+
+def enqueue(root, library, book_id, operation, *, source_sha256=None, reading_policy=None, peer_id=None, decision=None, request_id=None, pair_id=None, prior_request_id=None):
+    if operation not in ('translate','archive','relation','undo_relation','reconcile'):
         raise BridgeError('未知操作')
+    # EPUB parsing and hashing must never hold the cross-process queue lock.
+    book=snapshot(library,book_id)
+    state=availability(book)
+    health=bridge_health(root,book)
+    if not health['connected']: raise BridgeError(health['reason'])
+    if operation=='translate' and not health['ready']: raise BridgeError(health['reason'])
+    if book_id in health['manual_jobs']: raise BridgeError('這本書已在 Calibre 翻譯中')
+    if operation=='translate' and not state['can_translate']: raise BridgeError(state['reason'])
+    if operation=='archive' and not state['can_archive']: raise BridgeError(state['reason'])
+    if operation in ('translate','archive') and source_sha256 != state.get('source_sha256'):
+        raise BridgeError('原書已變更，請重新開啟詳細頁')
+    if operation=='translate' and reading_policy not in ('linked_pair','replace_main'):
+        raise BridgeError('請先選擇閱讀資產的保留方式')
+    peer=None
+    if operation=='relation':
+        if type(peer_id) is not int or peer_id<=0 or peer_id==book_id or decision not in ('same','different'):
+            raise BridgeError('版本配對選項無效')
+        peer=snapshot(library,peer_id)
+        if peer_id in health['manual_jobs']: raise BridgeError('對照書已在 Calibre 翻譯中')
+        if decision=='same' and not chinese_peer(peer): raise BridgeError('無法驗證對照書為中文版，請先核對')
+    active_uuids={book['uuid']} | ({peer['uuid']} if peer else set())
+    rid=request_id or uuid.uuid4().hex
+    if not re.fullmatch('[a-f0-9]{32}',rid): raise BridgeError('request ID 無效')
+    if operation=='reconcile' and not re.fullmatch('[a-f0-9]{32}',prior_request_id or ''):
+        raise BridgeError('待核對要求 ID 無效')
     with serial(root):
-        book=snapshot(library,book_id)
-        state=availability(book)
-        health=bridge_health(root,book)
-        if not health['ready']: raise BridgeError(health['reason'])
-        if book_id in health['manual_jobs']: raise BridgeError('這本書已在 Calibre 翻譯中')
-        if operation=='translate' and not state['can_translate']: raise BridgeError(state['reason'])
-        if operation=='archive' and not state['can_archive']: raise BridgeError(state['reason'])
-        if operation in ('translate','archive') and source_sha256 != state.get('source_sha256'):
-            raise BridgeError('原書已變更，請重新開啟詳細頁')
-        if operation=='translate' and reading_policy not in ('linked_pair','replace_main'):
-            raise BridgeError('請先選擇閱讀資產的保留方式')
-        peer=None
-        if operation=='relation':
-            if decision not in ('same','different') or int(peer_id)==int(book_id): raise BridgeError('版本配對選項無效')
-            peer=snapshot(library,peer_id)
-            if decision=='same' and not any(is_zh(v) for v in peer['languages']): raise BridgeError('對照書未標為中文，請先核對')
-        active_ids={int(book_id)} | ({int(peer_id)} if peer else set())
-        rid=request_id or uuid.uuid4().hex
-        if not re.fullmatch('[a-f0-9]{32}',rid): raise BridgeError('request ID 無效')
         for _,old in requests(root):
             if old['id']==rid:
-                if (old['book_uuid']!=book['uuid'] or old['operation']!=operation or
-                    any(old.get(k)!=v for k,v in {'source_sha256':source_sha256,'reading_policy':reading_policy,'peer_id':peer_id,'decision':decision,'pair_id':pair_id}.items())):
+                if (old['library_uuid']!=book['library_uuid'] or old['book_uuid']!=book['uuid'] or old['operation']!=operation or
+                    any(old.get(k)!=v for k,v in {'source_sha256':source_sha256,'reading_policy':reading_policy,'peer_id':peer_id,'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id}.items())):
                     raise BridgeError('request ID 衝突')
-                return old
-            if old.get('state') in ACTIVE and active_ids.intersection(set(old.get('book_ids',[old['book_id']]))):
-                if old['operation']==operation and old['book_id']==book_id and operation in ('translate','archive'):
-                    return old
-                raise BridgeError('本書已有待處理操作，請等候結果')
+                return request_view(root,old,health)
+            if old['library_uuid']!=book['library_uuid']: continue
+            identities={old['book_uuid']} | ({old['peer_uuid']} if old.get('peer_uuid') else set())
+            viewed=request_view(root,old,health)
+            if viewed.get('state') in ACTIVE and active_uuids.intersection(identities):
+                if operation=='reconcile' and old['id']==prior_request_id and viewed['state']=='needs_reconciliation': continue
+                if old['operation']==operation and old['book_uuid']==book['uuid'] and operation in ('translate','archive'):
+                    return viewed
+                raise BridgeError('本書已有待處理操作，請等候或核對結果')
         req={'schema':SCHEMA,'id':rid,'operation':operation,'state':'queued','created_at':time.time(),
-             'expires_at':time.time()+120,'instance':health['instance'],'library_uuid':book['library_uuid'],
+             'expires_at':time.time()+120,'instance':health['instance'],'owner_pid':health['pid'],'library_uuid':book['library_uuid'],
              'library_path':str(Path(library).resolve()),'book_id':int(book_id),'book_uuid':book['uuid'],
-             'book_ids':sorted(active_ids),'source_sha256':source_sha256,'reading_policy':reading_policy,
-             'peer_id':peer_id,'peer_uuid':peer['uuid'] if peer else None,'decision':decision,'pair_id':pair_id}
+             'book_ids':sorted({book_id} | ({peer_id} if peer else set())),
+             'source_sha256':source_sha256,'reading_policy':reading_policy,
+             'peer_id':peer_id,'peer_uuid':peer['uuid'] if peer else None,'peer_evidence':peer_evidence(peer) if peer else None,
+             'decision':decision,'pair_id':pair_id,'prior_request_id':prior_request_id}
         atomic_json(Path(root)/'requests'/(rid+'.json'),req)
         return req
 
@@ -403,50 +473,85 @@ class Consumer:
         req.update(state=state,updated_at=time.time(),**fields)
         atomic_json(self.root/'requests'/(req['id']+'.json'),req)
 
+    def event(self, req, state, **fields):
+        # A callback must not wait for the queue lock after a GUI job or storage
+        # has succeeded. Durable single-writer outcome is drained on next tick.
+        req.update(state=state,updated_at=time.time(),**fields)
+        atomic_json(self.root/'outcomes'/(req['id']+'.json'),req)
+
     def finish(self, req, success, detail=''):
-        with serial(self.root):
-            self.update(req,'completed' if success else 'failed',detail=detail)
+        self.event(req,'completed' if success else 'failed',detail=detail)
+
+    def reconcile(self, req, book):
+        old=read_json(self.root/'requests'/(req['prior_request_id']+'.json'))
+        if (not old or old['library_uuid']!=book['library_uuid'] or old['book_uuid']!=book['uuid'] or
+            old['instance']==self.instance): raise BridgeError('舊要求身分不符或仍屬目前工作擁有者')
+        old=request_view(self.root,old,bridge_health(self.root,book))
+        if old['state']!='needs_reconciliation': raise BridgeError('舊要求已有結果，請重新整理')
+        if set(old['book_ids']).intersection(self.manual_jobs()): raise BridgeError('Calibre 仍有相關翻譯工作，不能解除')
+        alive=process_alive(old.get('owner_pid'))
+        if old.get('owner_pid')!=os.getpid() and alive is not False:
+            raise BridgeError('原 Calibre 程序仍在執行或無法證明已結束，保留鎖定')
+        self.update(old,'interrupted',detail='使用者已核對；目前無相關 GUI 工作，舊程序已結束或同程序已確認無工作。未自動重送',resolved_by=req['id'])
 
     def tick(self):
         self.heartbeat()
-        with serial(self.root):
-            pending=next(((p,r) for p,r in requests(self.root) if r.get('state')=='queued'),None)
-            if pending is None: return
-            _,req=pending
-            if req['instance']!=self.instance or time.time()>req['expires_at']:
-                self.update(req,'rejected',detail='外掛世代已變更或要求已逾期；未啟動')
-                return
-            self.update(req,'starting')
+        try:
+            with serial(self.root):
+                for p in (self.root/'outcomes').glob('*.json'):
+                    event=read_json(p)
+                    old=read_json(self.root/'requests'/p.name)
+                    if old and event.get('instance')==old.get('instance'):
+                        atomic_json(self.root/'requests'/p.name,event)
+                        p.unlink()
+                for _,old in requests(self.root):
+                    if old['library_uuid']==self.library_uuid and old['instance']!=self.instance and old.get('state') in {'starting','running','storing'}:
+                        self.update(old,'needs_reconciliation',detail='工作擁有者已變更；結果待核對，不會自動重送')
+                pending=next(((p,r) for p,r in requests(self.root) if r.get('state')=='queued' and r['library_uuid']==self.library_uuid),None)
+                if pending is None: return
+                _,req=pending
+                if req['instance']!=self.instance or time.time()>req['expires_at']:
+                    self.update(req,'rejected',detail='外掛世代已變更或要求已逾期；未啟動')
+                    return
+                self.update(req,'starting')
+        except BridgeError:
+            return  # Busy queue: Qt retries next tick, never invents a failure.
         try:
             book=snapshot(self.library,req['book_id'])
             if (book['library_uuid']!=req['library_uuid'] or book['uuid']!=req['book_uuid'] or
                 str(self.library)!=req['library_path']):
                 raise BridgeError('目前書庫或書籍身分與要求不符')
-            if req['book_id'] in self.manual_jobs(): raise BridgeError('Calibre 已有同書翻譯 job')
-            ready,reason=self.readiness()
-            if not ready: raise BridgeError(reason)
+            if set(req['book_ids']).intersection(self.manual_jobs()): raise BridgeError('Calibre 已有相關翻譯 job')
             op=req['operation']
+            if op=='translate':
+                ready,reason=self.readiness()
+                if not ready: raise BridgeError(reason)
             if op in ('translate','archive'):
                 st=availability(book)
                 if req['source_sha256']!=st.get('source_sha256'): raise BridgeError('主檔已變更')
                 if not st['can_'+op]: raise BridgeError(st['reason'])
             if op=='translate':
-                job=self.start_translation(req,book,lambda success,detail='':self.finish(req,success,detail))
+                def done(success,detail=''): self.finish(req,success,detail)
+                done.storing=lambda:self.event(req,'storing',detail='翻譯已完成，正在存回 Calibre')
+                job=self.start_translation(req,book,done)
                 if job is None: raise BridgeError('外掛未建立 GUI job')
-                # A synchronous test callback may already have completed.
                 if req['state'] not in TERMINAL:
-                    with serial(self.root): self.update(req,'running',job_id=str(getattr(job,'id','')),detail='Calibre GUI job 已建立')
+                    self.event(req,'running',job_id=str(getattr(job,'id','')),detail='Calibre GUI job 已建立')
             elif op=='archive':
                 self.archive(book,st['archive'])
                 self.finish(req,True,'英文原檔已收進 Data，雙語版已成主 EPUB')
             elif op=='relation':
                 peer=snapshot(self.library,req['peer_id'])
-                if peer['uuid']!=req['peer_uuid']: raise BridgeError('對照書已變更')
+                if peer_evidence(peer)!=req['peer_evidence']: raise BridgeError('對照版本的身分、語言或內文已變更，請重新核對')
+                if req['decision']=='same' and not chinese_peer(peer): raise BridgeError('對照書已無可驗證中文版，未寫入')
                 self.relation(book,peer,req['decision'])
                 self.finish(req,True,'兩側版本關係已記錄，可各自撤銷')
             elif op=='undo_relation':
                 self.undo_relation(book,req.get('pair_id'))
                 self.finish(req,True,'本側版本關係已撤銷，其他內容保留')
+            elif op=='reconcile':
+                with serial(self.root): self.reconcile(req,book)
+                self.finish(req,True,'舊要求已核對解除；請重新開啟書籍，依目前版本決定下一步')
             else: raise BridgeError('未知操作')
         except Exception as exc:
             self.finish(req,False,str(exc))
@@ -476,7 +581,6 @@ class Consumer:
             self.add_data(book['id'],prefix+'source.epub',backup.read_bytes(),replace=False)
             if 'translation' in variant['roles']:
                 self.add_data(book['id'],prefix+'translation.zh.epub',Path(variant['roles']['translation']).read_bytes(),replace=False)
-            self.add_data(book['id'],prefix+'manifest.json',json.dumps(manifest,ensure_ascii=False).encode(),replace=False)
             try:
                 if self.api.add_format(book['id'],'EPUB',str(bilingual),replace=True,run_hooks=False) is False:
                     raise BridgeError('Calibre 拒絕主檔替換')
@@ -484,13 +588,26 @@ class Consumer:
                     raise BridgeError('雙語主檔 SHA 不符')
                 self.api.set_field('identifiers',{book['id']:dict(original_ids,**{'ebook-translator-variant':'bilingual:'+run_id})})
                 self.api.set_field('tags',{book['id']:list(dict.fromkeys(original_tags+['雙語_','附中譯_']))})
-            except Exception:
-                if self.api.add_format(book['id'],'EPUB',str(backup),replace=True,run_hooks=False) is False:
-                    raise BridgeError('替換失敗且回復失敗；Data 已保留原檔 '+prefix+'source.epub')
-                self.api.set_field('identifiers',{book['id']:original_ids})
-                self.api.set_field('tags',{book['id']:original_tags})
-                if file_hash(self.api.format_abspath(book['id'],'EPUB'))!=book['facts']['sha256']:
-                    raise BridgeError('回復後原檔 SHA 不符；Data 仍保留備份')
+                # Publish the committed manifest last. Source backup remains on failure.
+                self.add_data(book['id'],prefix+'manifest.json',json.dumps(manifest,ensure_ascii=False).encode(),replace=False)
+            except Exception as original:
+                errors=[]
+                try:
+                    if self.api.add_format(book['id'],'EPUB',str(backup),replace=True,run_hooks=False) is False:
+                        raise BridgeError('Calibre 拒絕回復主檔')
+                    if file_hash(self.api.format_abspath(book['id'],'EPUB'))!=book['facts']['sha256']:
+                        raise BridgeError('回復後原檔 SHA 不符')
+                except Exception as exc: errors.append(str(exc))
+                for field,value in (('identifiers',original_ids),('tags',original_tags)):
+                    try:self.api.set_field(field,{book['id']:value})
+                    except Exception as exc:errors.append(str(exc))
+                try:
+                    committed=inside(book['directory'],prefix+'manifest.json')
+                    if committed.exists():
+                        self.api.remove_extra_files(book['id'],[prefix+'manifest.json'])
+                        if committed.exists(): raise BridgeError('本次 manifest 回復移除失敗')
+                except Exception as exc: errors.append(str(exc))
+                if errors: raise BridgeError('封存回復未完成；Data 保留原檔 '+prefix+'source.epub；'+ '; '.join(errors)) from original
                 raise
 
     def h2o_paths(self,book):

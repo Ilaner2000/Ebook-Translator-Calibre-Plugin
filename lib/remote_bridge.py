@@ -26,6 +26,7 @@ class RemoteWorker(ConversionWorker):
             if isinstance(result,dict):
                 payload=dict(payload,v2_unrecoverable_keep_source=result.get('v2_unrecoverable_keep_source',False) is True,
                              kept_source_paragraphs=result.get('kept_source_paragraphs',[]))
+            if hasattr(self.done,'storing'): self.done.storing()
             self._store_variants(ebook,payload)
             self.done(True,'翻譯完成，版本已存回 Calibre')
         except Exception as exc:

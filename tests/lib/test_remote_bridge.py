@@ -39,3 +39,13 @@ class RemoteGuardTests(unittest.TestCase):
         worker.working_jobs={job:(self.ebook,{'variants':True})};worker.done=Mock()
         worker._store_variants=Mock(side_effect=RuntimeError('write refused'))
         worker.translate_done(job);worker.done.assert_called_once_with(False,'write refused')
+
+    def test_storing_precedes_write_and_success_follows_write(self):
+        worker=RemoteWorker.__new__(RemoteWorker);job=Mock();job.failed=False;job.result={}
+        worker.working_jobs={job:(self.ebook,{'variants':True})};trace=[]
+        def done(success,detail):trace.append(('done',success))
+        done.storing=lambda:trace.append(('storing',))
+        worker.done=done;worker._store_variants=lambda *args:trace.append(('write',))
+        worker.translate_done(job)
+        self.assertEqual(trace,[('storing',),('write',),('done',True)])
+        self.assertFalse(worker.working_jobs)
