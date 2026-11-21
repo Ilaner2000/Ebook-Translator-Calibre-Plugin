@@ -480,12 +480,15 @@ class ConversionWorker:
         self.working_jobs[job] = (ebook, output_path)
 
     def translate_variants(
-            self, ebook, input_path, cache_only=False, is_batch=False):
+            self, ebook, input_path, cache_only=False, is_batch=False,
+            reading_policy=None, interactive=True):
         scope_is_valid = (
             self.config.get('to_library') and ebook.id is not None and
             ebook.input_format.lower() == 'epub' and
             ebook.output_format.lower() == 'epub')
         if not scope_is_valid:
+            if not interactive:
+                raise ValueError('Remote translation requires a library EPUB and EPUB output')
             error_dialog(
                 self.gui, _('Translation Variants'), _(
                     'Translation variants currently require a Calibre '
@@ -510,16 +513,21 @@ class ConversionWorker:
                 # replacing its main EPUB.
                 has_annotations = has_last_read = True
             if has_annotations or has_last_read:
-                keep_preset_a = question_dialog(
-                    self.gui, _('Translation Variants'), _(
-                        'The source book has highlights or reading progress, '
-                        'or their status could not be verified. Preset A '
-                        'replaces the main EPUB and may make those reading '
-                        'assets unusable. Do you want to keep preset A for '
-                        'this run?'),
-                    default_yes=False,
-                    yes_text=_('Keep preset A'),
-                    no_text=_('Use preset B (safe)'))
+                if not interactive:
+                    if reading_policy not in ('linked_pair', 'replace_main'):
+                        raise ValueError('Reading asset choice is required on the requesting device')
+                    keep_preset_a = reading_policy == 'replace_main'
+                else:
+                    keep_preset_a = question_dialog(
+                        self.gui, _('Translation Variants'), _(
+                            'The source book has highlights or reading progress, '
+                            'or their status could not be verified. Preset A '
+                            'replaces the main EPUB and may make those reading '
+                            'assets unusable. Do you want to keep preset A for '
+                            'this run?'),
+                        default_yes=False,
+                        yes_text=_('Keep preset A'),
+                        no_text=_('Use preset B (safe)'))
                 if not keep_preset_a:
                     effective_storage = 'linked_pair'
 
@@ -531,6 +539,8 @@ class ConversionWorker:
             translation_path = temporary_path('.translation.epub')
             bilingual_path = temporary_path('.bilingual.epub')
         except Exception:
+            if not interactive:
+                raise
             error_dialog(
                 self.gui, _('Translation Variants'), _(
                     'Could not stage the source EPUB for variant output.'),

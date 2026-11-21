@@ -14,6 +14,9 @@ from ..engines import (
 
 defaults: dict[str, Any] = {
     'preferred_mode': None,
+    # Set at deployment to wasn_paths.RUNTIME_TMP_DIR / 'ebook-translator-bridge'.
+    'remote_bridge_root': None,
+    'remote_h2o_root': None,
     'to_library': True,
     'output_path': None,
     'translate_engine': None,

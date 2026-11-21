@@ -1,6 +1,6 @@
 import os.path
 
-from qt.core import QMenu, QSettings  # type: ignore
+from qt.core import QMenu, QSettings, QTimer  # type: ignore
 from calibre.utils.localization import _  # type: ignore
 from calibre.gui2.actions import InterfaceAction  # type: ignore
 from calibre.utils.config_base import plugin_dir  # type: ignore
@@ -62,6 +62,13 @@ class EbookTranslatorGui(InterfaceAction):
 
         if not getattr(self.gui, 'bookfere_ebook_translator', False):
             self.gui.bookfere_ebook_translator = self.Status()
+
+        # S975: opt-in local spool, consumed on the Qt main thread.
+        from .lib.remote_bridge import RemoteBridge
+        self.remote_bridge = RemoteBridge(self)
+        self.remote_timer = QTimer(self.gui)
+        self.remote_timer.timeout.connect(self.remote_bridge.tick)
+        self.remote_timer.start(1000)
 
     def advanced_translation_window(self, ebook):
         name = 'advanced_' + uid(ebook.get_input_path())
