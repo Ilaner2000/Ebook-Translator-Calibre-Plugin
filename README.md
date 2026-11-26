@@ -65,3 +65,5 @@ __Plugin Homepage__: [https://translator.bookfere.com](https://translator.bookfe
 V2 HTTP failures retain their structured status through the request boundary. HTTP 5xx exhaustion retains source for the current job and retries in the next ordinary job; HTTP 4xx, unknown errors and fatal failures remain blocked. Every blocked V2 row logs its source ID, page, exception chain and response stage. A job with failed or unprocessed required rows reports a blocking error before rendering instead of a successful completion notice.
 
 The 2.4.10 Equality row 729 log proves its first timeout attempt, but does not contain its final exception; the new diagnostics identify any recurrence without guessing a fallback for arbitrary NULL translations.
+
+Paired V2 output preserves exact NCX/metadata whitespace when projecting cached inline markers; retained rows, including protected line breaks, remain source-only in both variants without suppressing missing-target validation.

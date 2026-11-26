@@ -944,7 +944,11 @@ class ElementHandler:
                 # Paired output's second, cache-only pass uses the very same
                 # V2 responses but retains the legacy bilingual DOM renderer.
                 from .only_mode import TOKEN
-                original = trim(TOKEN.sub('', original))
+                # Only marker-bearing page content needs re-trimming after
+                # projection. NCX/metadata originals keep exact whitespace;
+                # normalizing their em spaces breaks extraction/row identity.
+                if TOKEN.search(original):
+                    original = trim(TOKEN.sub('', original))
                 if translated is not None:
                     translated = TOKEN.sub('', translated)
             translations[original] = translated

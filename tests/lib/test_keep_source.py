@@ -185,3 +185,79 @@ class TestKeepSource(unittest.TestCase):
             worker.translate_done(job)
         self.assertEqual(rows,store.call_args.args[1]['kept_source_paragraphs'])
         self.assertTrue(store.call_args.args[1]['v2_unrecoverable_keep_source'])
+
+
+class TestPairedRetainedNavigation(unittest.TestCase):
+    """Real S601 row 333 plus the preceding Unicode-spaced NCX title."""
+    def fixture(self, position='below', navigation=True):
+        from calibre.ebooks.oeb.base import TOC
+        from ...lib.element import TocElement
+        from ...engines.base import Base
+        markup='<div><h1 class="sec1"><b class="calibre6">Meditation and Formal<br class="calibre7"/> Practice</b></h1><p>Hello</p></div>'
+        root=etree.fromstring(markup.encode())
+        h=ElementHandler(Base.placeholder,Base.separator,position)
+        h.set_only_policy({'preserve_inline':True} if position=='only' else None)
+        h.inline_cache_to_plain=position=='below';h.keep_unrecoverable_source=True
+        h.load_remove_rules();h.load_reserve_rules()
+        toc=TOC();toc.add("IV\u2003Meditation and Formal Practice",'Ja_12_ch11.html','pt4')
+        elements=([TocElement(toc.nodes[0],'toc.ncx')] if navigation else [])+[PageElement(n,'Ja_12_ch11') for n in root]
+        h.prepare_original(elements)
+        return root,toc,h
+
+    def paragraphs(self):
+        root,toc,only=self.fixture('only')
+        rows=[Paragraph(*row) for row in only.originals]
+        rows[0].translation='IV\u2003冥想與正式練習'
+        rows[1].keep_source=True;rows[1].failure_reason='placeholder_unrecoverable'
+        rows[2].translation='成功'
+        self.assertEqual('⟦ET0O⟧Meditation and Formal{{id_00000}} Practice⟦ET0C⟧',rows[1].original)
+        return rows
+
+    def test_real_heading_and_unicode_toc_render_in_both_variants_for_all_retention_reasons(self):
+        from ...lib.cache import SOURCE_RETENTION_OUTPUT_REASONS
+        for position in ['only','below']:
+            for reason in SOURCE_RETENTION_OUTPUT_REASONS:
+                with self.subTest(position=position,reason=reason):
+                    root,toc,h=self.fixture(position);rows=self.paragraphs()
+                    rows[1].failure_reason=reason;before=etree.tostring(root[0])
+                    h.add_translations(rows)
+                    self.assertEqual(before,etree.tostring(root[0]))
+                    self.assertEqual(1,len(root.xpath('.//br')))
+                    self.assertEqual(3 if position=='below' else 2,len(root))
+                    self.assertIn('成功',''.join(root.itertext()))
+                    self.assertEqual("IV\u2003Meditation and Formal Practice IV\u2003冥想與正式練習" if position=='below' else 'IV\u2003冥想與正式練習',toc.nodes[0].title)
+                    self.assertIsNone(rows[1].translation)
+
+    def test_unicode_toc_is_rendered_when_retention_option_is_off(self):
+        root,toc,h=self.fixture();rows=self.paragraphs();h.keep_unrecoverable_source=False
+        rows[1].keep_source=False;rows[1].translation='⟦ET0O⟧冥想{{id_00000}}練習⟦ET0C⟧'
+        h.add_translations(rows)
+        self.assertIn('冥想與正式練習',toc.nodes[0].title)
+
+    def test_missing_nonretained_target_still_blocks_before_dom_mutation(self):
+        root,toc,h=self.fixture();rows=self.paragraphs();rows[2].translation=None
+        before=etree.tostring(root);title=toc.nodes[0].title
+        with self.assertRaises(InlineAlignmentError):h.add_translations(rows)
+        self.assertEqual(before,etree.tostring(root));self.assertEqual(title,toc.nodes[0].title)
+
+    def test_wrong_raw_retention_cannot_authorize_real_heading(self):
+        root,toc,h=self.fixture();rows=self.paragraphs();rows[1].raw='<h1>stale</h1>'
+        before=etree.tostring(root)
+        with self.assertRaises(InlineAlignmentError):h.add_translations(rows)
+        self.assertEqual(before,etree.tostring(root))
+
+    def test_metadata_and_toc_keep_exact_whitespace_identity(self):
+        from ...lib.element import MetadataElement,TocElement
+        from calibre.ebooks.oeb.base import TOC,Metadata
+        from ...engines.base import Base
+        from types import SimpleNamespace
+        metadata=SimpleNamespace(title=[SimpleNamespace(content='A\u2003Title')])
+        toc=TOC();toc.add('A\u2003Title','c.xhtml','c');toc.add('A Title','d.xhtml','d')
+        h=ElementHandler(Base.placeholder,Base.separator,'below');h.inline_cache_to_plain=True
+        h.keep_unrecoverable_source=True;h.load_remove_rules();h.load_reserve_rules()
+        h.prepare_original([MetadataElement(metadata.title[0],'content.opf'),TocElement(toc.nodes[0],'toc.ncx'),TocElement(toc.nodes[1],'toc.ncx')])
+        rows=[Paragraph(*r) for r in h.originals]
+        for row,target in zip(rows,['甲','乙','丙']):row.translation=target
+        h.add_translations(rows)
+        self.assertEqual('A\u2003Title 甲',metadata.title[0].content)
+        self.assertEqual(['A\u2003Title 乙','A Title 丙'],[n.title for n in toc.nodes])
